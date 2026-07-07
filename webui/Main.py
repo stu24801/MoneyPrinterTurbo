@@ -577,8 +577,7 @@ with left_panel:
         )
 
 with middle_panel:
-    with st.container(border=True):
-        st.write(tr("Video Settings"))
+    with st.expander("🎬 " + tr("Video Settings"), expanded=False):
         video_concat_modes = [
             (tr("Sequential"), "sequential"),
             (tr("Random"), "random"),
@@ -689,8 +688,7 @@ with middle_panel:
             options=[1, 2, 3, 4, 5],
             index=0,
         )
-    with st.container(border=True):
-        st.write(tr("Audio Settings"))
+    with st.expander("🎧 " + tr("Audio Settings"), expanded=False):
 
         # 添加TTS服务器选择下拉框
         tts_servers = [
@@ -923,8 +921,7 @@ with middle_panel:
         )
 
 with right_panel:
-    with st.container(border=True):
-        st.write(tr("Subtitle Settings"))
+    with st.expander("💬 " + tr("Subtitle Settings"), expanded=False):
         params.subtitle_enabled = st.checkbox(tr("Enable Subtitles"), value=True)
         font_names = get_all_fonts()
         saved_font_name = config.ui.get("font_name", "MicrosoftYaHeiBold.ttc")
@@ -1068,12 +1065,10 @@ def _validate_generation_params():
         st.stop()
 
 
-btn_generate_col, btn_storyboard_col = st.columns(2)
-start_button = btn_generate_col.button(
-    tr("Generate Video"), use_container_width=True, type="primary"
-)
-storyboard_button = btn_storyboard_col.button(
-    tr("Create Storyboard"), use_container_width=True
+# 強制走故事版流程：隱藏一鍵生成影片按鈕，故事版為唯一入口
+start_button = False
+storyboard_button = st.button(
+    tr("Create Storyboard"), use_container_width=True, type="primary"
 )
 
 if start_button:
@@ -1195,13 +1190,35 @@ def _load_characters(task_id: str) -> list:
         return []
 
 
-def _save_storyboard_data(task_id: str, style: str, segments: list, characters=None):
-    # characters=None → keep whatever is already on disk
+def _load_stage(task_id: str) -> str:
+    """The persisted editing stage ('board' | 'segments'), so reopening resumes
+    exactly where the user left off. Empty string if none saved."""
+    try:
+        with open(_storyboard_file(task_id), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("stage", "") if isinstance(data, dict) else ""
+    except Exception:
+        return ""
+
+
+def _save_storyboard_data(task_id: str, style: str, segments: list, characters=None, stage=None):
+    # characters/stage = None → keep whatever is already on disk
+    existing = {}
+    if characters is None or stage is None:
+        try:
+            with open(_storyboard_file(task_id), "r", encoding="utf-8") as f:
+                existing = json.load(f)
+                if not isinstance(existing, dict):
+                    existing = {}
+        except Exception:
+            existing = {}
     if characters is None:
-        characters = _load_characters(task_id)
+        characters = existing.get("characters", [])
+    if stage is None:
+        stage = existing.get("stage", "board")
     with open(_storyboard_file(task_id), "w", encoding="utf-8") as f:
-        json.dump({"style": style, "characters": characters, "segments": segments},
-                  f, ensure_ascii=False, indent=2)
+        json.dump({"style": style, "characters": characters, "segments": segments,
+                   "stage": stage}, f, ensure_ascii=False, indent=2)
 
 
 def _ensure_character_refs(task_id, characters, style, aspect):
@@ -1363,10 +1380,15 @@ if _sb:
 
     _sb_stage = _sb.get("stage", "board")
     if _sb_stage == "auto":
-        _all_rendered = bool(_segments) and all(
-            s.get("segment_video") and os.path.exists(s["segment_video"]) for s in _segments
-        )
-        _sb_stage = "segments" if _all_rendered else "board"
+        # Prefer the stage the user explicitly saved; else infer from progress.
+        _saved_stage = _load_stage(_sb_tid)
+        if _saved_stage in ("board", "segments"):
+            _sb_stage = _saved_stage
+        else:
+            _all_rendered = bool(_segments) and all(
+                s.get("segment_video") and os.path.exists(s["segment_video"]) for s in _segments
+            )
+            _sb_stage = "segments" if _all_rendered else "board"
         st.session_state["storyboard"]["stage"] = _sb_stage
 
     # 舊版故事版缺全片風格或演繹腳本 → 一次補產
@@ -1613,7 +1635,12 @@ if _sb:
 
         st.info(tr("Storyboard Hint"))
 
-        c_ok, c_discard = st.columns(2)
+        c_ok, c_save, c_discard = st.columns(3)
+        if c_save.button("💾 " + tr("Save & continue later"), use_container_width=True):
+            _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="board")
+            st.session_state.pop("storyboard", None)
+            st.toast("💾 " + tr("Progress saved"))
+            st.rerun()
         if c_ok.button("🎬 " + tr("Render Segments"), use_container_width=True, type="primary"):
             _appended = []
             for i, seg in enumerate(_segments):
@@ -1654,6 +1681,7 @@ if _sb:
                 st.error(tr("Video Generation Failed"))
             else:
                 st.session_state["storyboard"]["stage"] = "segments"
+                _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="segments")
                 st.rerun()
         if c_discard.button("🗑 " + tr("Discard Storyboard"), use_container_width=True):
             del st.session_state["storyboard"]
@@ -1693,7 +1721,12 @@ if _sb:
                     else:
                         st.error(tr("Video Generation Failed"))
 
-        c_merge, c_back, c_drop = st.columns(3)
+        c_merge, c_back, c_save2, c_drop = st.columns(4)
+        if c_save2.button("💾 " + tr("Save & continue later"), use_container_width=True):
+            _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="segments")
+            st.session_state.pop("storyboard", None)
+            st.toast("💾 " + tr("Progress saved"))
+            st.rerun()
         if c_merge.button("✅ " + tr("Confirm & Merge"), use_container_width=True, type="primary"):
             _seg_files = [s.get("segment_video") for s in _segments]
             _seg_fx = [s.get("transition_effect", "none") for s in _segments]
@@ -1708,6 +1741,7 @@ if _sb:
                 del st.session_state["storyboard"]
         if c_back.button("⬅ " + tr("Back to Storyboard"), use_container_width=True):
             st.session_state["storyboard"]["stage"] = "board"
+            _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="board")
             st.rerun()
         if c_drop.button("🗑 " + tr("Discard Storyboard"), use_container_width=True):
             del st.session_state["storyboard"]
@@ -1716,7 +1750,7 @@ if _sb:
 
 # ── 產製歷史區 ─────────────────────────────────────────────────────────────────
 st.divider()
-with st.expander("📜 " + tr("Generation History"), expanded=False):
+with st.expander("📁 " + tr("Generation History"), expanded=True):
     _tasks_root = utils.storage_dir("tasks")
     _entries = []
     if os.path.isdir(_tasks_root):
@@ -1789,7 +1823,10 @@ with st.expander("📜 " + tr("Generation History"), expanded=False):
             os.path.join(_tdir, f) for f in os.listdir(_tdir)
             if f.endswith(".png.mp4") or (f.startswith("llm-video-") and f.endswith(".mp4"))
         )
-        if _h_clips:
+        # Reopen whenever a storyboard exists (even text-only / image-only,
+        # e.g. saved at board stage), so editing can always be continued.
+        _has_sb = os.path.exists(os.path.join(_tdir, "storyboard.json"))
+        if _has_sb or _h_clips:
             if _hb_sb.button("📋 " + tr("Reopen Storyboard"), key=f"sb_task_{_tid}",
                              use_container_width=True):
                 st.session_state["_pending_load"] = {

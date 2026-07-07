@@ -128,7 +128,7 @@
     "Storyboard Hint": "角色展演模式：上方可編輯登場角色，每段可改場景與劇情台詞（角色名（情感）：台詞）。逐段產生分鏡圖/素材影片後，點「產生分段影片」會用各角色聲線分別演出台詞。",
     "Confirm Storyboard": "確認故事版，合成影片",
     "Discard Storyboard": "捨棄故事版",
-    "Generation History": "產製歷史",
+    "Generation History": "專案專區",
     "No history yet": "尚無產製紀錄",
     "Incomplete": "未完成",
     "Delete Task": "刪除此紀錄",
@@ -193,6 +193,8 @@
     "Reference description": "參考說明（描述要加入的元素）",
     "Reference desc placeholder": "例如：戴紅色帽子、桌上放一杯珍奶",
     "Upload reference images": "上傳參考圖片（可多張，套用到分鏡圖與素材影片）",
-    "Also include": "並加入以下元素"
+    "Also include": "並加入以下元素",
+    "Save & continue later": "儲存進度（稍後接續）",
+    "Progress saved": "進度已儲存，可從「產製歷史」重開故事版接續編輯"
   }
 }

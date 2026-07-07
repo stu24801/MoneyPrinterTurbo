@@ -128,7 +128,7 @@
     "Storyboard Hint": "角色展演模式：上方可编辑登场角色，每段可改场景与剧情台词（角色名（情感）：台词）。逐段产生分镜图/素材视频后，点「生成分段视频」会用各角色声线分别演出台词。",
     "Confirm Storyboard": "确认故事板，合成视频",
     "Discard Storyboard": "舍弃故事板",
-    "Generation History": "生成历史",
+    "Generation History": "项目专区",
     "No history yet": "暂无生成记录",
     "Incomplete": "未完成",
     "Delete Task": "删除此记录",
@@ -193,6 +193,8 @@
     "Reference description": "参考说明（描述要加入的元素）",
     "Reference desc placeholder": "例如：戴红色帽子、桌上放一杯珍奶",
     "Upload reference images": "上传参考图片（可多张，套用到分镜图与素材视频）",
-    "Also include": "并加入以下元素"
+    "Also include": "并加入以下元素",
+    "Save & continue later": "保存进度（稍后继续）",
+    "Progress saved": "进度已保存，可从「生成历史」重开故事板继续编辑"
   }
 }

@@ -127,7 +127,7 @@
     "Storyboard Hint": "Drama mode: edit the cast above; per segment edit the scene and dialogue (Name（emotion）：line). After generating images/clips, Render Segments voices each character's lines separately.",
     "Confirm Storyboard": "Confirm Storyboard & Synthesize",
     "Discard Storyboard": "Discard Storyboard",
-    "Generation History": "Generation History",
+    "Generation History": "Projects",
     "No history yet": "No history yet",
     "Incomplete": "incomplete",
     "Delete Task": "Delete",
@@ -192,6 +192,8 @@
     "Reference description": "Reference description (elements to include)",
     "Reference desc placeholder": "e.g. wearing a red hat, a cup of bubble tea on the table",
     "Upload reference images": "Upload reference images (applied to image & clip)",
-    "Also include": "Also include"
+    "Also include": "Also include",
+    "Save & continue later": "Save & continue later",
+    "Progress saved": "Progress saved — reopen from Generation History to continue"
   }
 }
