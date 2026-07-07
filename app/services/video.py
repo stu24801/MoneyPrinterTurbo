@@ -502,11 +502,17 @@ def compose_segment_video(clip_path, audio_path, subtitle_path, output_file, par
     video_width, video_height = aspect.to_resolution()
     output_dir = os.path.dirname(output_file)
 
-    voice = AudioFileClip(audio_path).with_effects([afx.MultiplyVolume(params.voice_volume)])
-    target = voice.duration
-
     src = VideoFileClip(clip_path)
     native_audio = src.audio  # Veo ambient sound (may be None for image clips)
+
+    # 無旁白模式（audio_path 空）：只用畫面本身的原生音軌，長度=片段長度
+    _has_voice = bool(audio_path) and os.path.exists(audio_path)
+    if _has_voice:
+        voice = AudioFileClip(audio_path).with_effects([afx.MultiplyVolume(params.voice_volume)])
+        target = voice.duration
+    else:
+        voice = None
+        target = src.duration
 
     # resize/pad the visual to the target frame size
     vid = src.without_audio()
@@ -533,16 +539,24 @@ def compose_segment_video(clip_path, audio_path, subtitle_path, output_file, par
         base_video = concatenate_videoclips([vid, hold])
     base_video = base_video.with_duration(target)
 
-    # audio: voiceover + low ambient from the clip's native sound
-    audio_layers = [voice]
-    if native_audio is not None:
+    # audio
+    if _has_voice:
+        # 有旁白：旁白為主 + 原生環境音低音量混入
+        audio_layers = [voice]
+        if native_audio is not None:
+            try:
+                amb = native_audio.subclipped(0, min(native_audio.duration, target))
+                amb = amb.with_effects([afx.MultiplyVolume(ambient_volume)])
+                audio_layers.append(amb)
+            except Exception as e:
+                logger.warning(f"ambient audio skipped: {e}")
+        base_video = base_video.with_audio(CompositeAudioClip(audio_layers))
+    elif native_audio is not None:
+        # 無旁白：直接用畫面原生音軌（正常音量）
         try:
-            amb = native_audio.subclipped(0, min(native_audio.duration, target))
-            amb = amb.with_effects([afx.MultiplyVolume(ambient_volume)])
-            audio_layers.append(amb)
+            base_video = base_video.with_audio(native_audio.subclipped(0, min(native_audio.duration, target)))
         except Exception as e:
-            logger.warning(f"ambient audio skipped: {e}")
-    base_video = base_video.with_audio(CompositeAudioClip(audio_layers))
+            logger.warning(f"native audio kept-raw failed: {e}")
 
     # subtitles
     if params.subtitle_enabled and subtitle_path and os.path.exists(subtitle_path):

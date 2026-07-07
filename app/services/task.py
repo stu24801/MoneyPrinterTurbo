@@ -196,43 +196,46 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
     return {"rendered": rendered, "total": total}
 
 
-def _generate_bridge(task_id, params, seg, idx, style, bridge_voice):
+def _generate_bridge(task_id, params, seg, idx, style, bridge_voice, narration=False):
     """Generate a short bridging (串場) clip from a segment's connecting note
-    (串接說明 / transition_note): a transitional Veo scene + a brief narration of
-    the note, composed into a mini interstitial. Returns the path or ""."""
+    (串接說明 / transition_note): a transitional Veo scene. When narration=True a
+    brief voiceover + subtitle of the note is added; otherwise the bridge is just
+    the transitional scene with its own ambient sound. Returns the path or ""."""
     note = (seg.get("transition_note") or "").strip()
     if not note:
         return ""
     task_dir = utils.task_dir(task_id)
     uid = seg.get("uid", idx)
-    # 1. narration of the connecting note (brief bridge voiceover)
-    audio_f = path.join(task_dir, f"bridge-{uid}-audio.mp3")
-    if not voice.tts_emotion(text=note, voice_name=bridge_voice, emotion="平靜", out_file=audio_f):
-        sm = voice.tts(text=note, voice_name=voice.parse_voice_name(bridge_voice),
-                       voice_rate=1.0, voice_file=audio_f)
-        if sm is None or not path.exists(audio_f):
-            return ""
-    # 2. transitional Veo scene from the note (cinematic connecting shot)
+    # transitional Veo scene from the note (cinematic connecting shot)
     bridge_prompt = (f"電影感的轉場過渡畫面，銜接劇情：{note}。柔和運鏡，無文字")
     vclip = material.generate_single_video_llm(
         task_id, bridge_prompt, VideoAspect(_aspect_value(params)),
         max_clip_duration=4, index=f"bridge-{uid}", style=style, reference_image="")
     if not vclip or not path.exists(vclip):
         return ""
-    # 3. subtitle for the bridge narration
-    srt_f = ""
-    if params.subtitle_enabled:
-        srt_f = path.join(task_dir, f"bridge-{uid}.srt")
-        try:
-            sm2 = voice.tts(text=note, voice_name=voice.parse_voice_name(bridge_voice),
-                            voice_rate=1.0, voice_file=path.join(task_dir, f"bridge-{uid}-sub.mp3"))
-            if sm2 is not None:
-                voice.create_subtitle(sub_maker=sm2, text=note, subtitle_file=srt_f)
-        except Exception:
-            srt_f = ""
-        if not path.exists(srt_f):
-            srt_f = ""
-    # 4. compose bridge (video + narration, ambient kept)
+
+    audio_f, srt_f = "", ""
+    if narration:
+        # 選用：串接說明的旁白 + 字幕
+        audio_f = path.join(task_dir, f"bridge-{uid}-audio.mp3")
+        if not voice.tts_emotion(text=note, voice_name=bridge_voice, emotion="平靜", out_file=audio_f):
+            sm = voice.tts(text=note, voice_name=voice.parse_voice_name(bridge_voice),
+                           voice_rate=1.0, voice_file=audio_f)
+            if sm is None or not path.exists(audio_f):
+                audio_f = ""
+        if audio_f and params.subtitle_enabled:
+            srt_f = path.join(task_dir, f"bridge-{uid}.srt")
+            try:
+                sm2 = voice.tts(text=note, voice_name=voice.parse_voice_name(bridge_voice),
+                                voice_rate=1.0, voice_file=path.join(task_dir, f"bridge-{uid}-sub.mp3"))
+                if sm2 is not None:
+                    voice.create_subtitle(sub_maker=sm2, text=note, subtitle_file=srt_f)
+            except Exception:
+                srt_f = ""
+            if not path.exists(srt_f):
+                srt_f = ""
+
+    # compose bridge — narration off → 只用畫面+原生環境音（audio_f 空）
     out = path.join(task_dir, f"bridge-{uid}.mp4")
     try:
         video.compose_segment_video(clip_path=vclip, audio_path=audio_f,
@@ -243,7 +246,8 @@ def _generate_bridge(task_id, params, seg, idx, style, bridge_voice):
     return out if path.exists(out) else ""
 
 
-def job_merge(task_id, params: VideoParams, use_transitions=True, with_bridges=False):
+def job_merge(task_id, params: VideoParams, use_transitions=True, with_bridges=False,
+              bridge_narration=False):
     """Merge all rendered segment videos into the final film. use_transitions=False
     → hard cuts (continuous). with_bridges=True → generate a short interstitial
     (串場) from each segment's connecting note and insert it between segments
@@ -268,11 +272,15 @@ def job_merge(task_id, params: VideoParams, use_transitions=True, with_bridges=F
         # 串場：段落之後（最後一段除外）插入依串接說明生成的過渡片段
         if with_bridges and i < len(segs) - 1:
             bclip = s.get("bridge_clip")
-            if not (bclip and os.path.exists(bclip)):
+            # 旁白模式改變時，已快取的串場要重新產製
+            _stale = bool(bclip) and s.get("bridge_narration") != bool(bridge_narration)
+            if not (bclip and os.path.exists(bclip)) or _stale:
                 jobs.update_progress(task_id, "merge", i, len(segs), f"bridge {i + 1}")
-                bclip = _generate_bridge(task_id, params, s, i, style, bridge_voice)
+                bclip = _generate_bridge(task_id, params, s, i, style, bridge_voice,
+                                         narration=bridge_narration)
                 if bclip:
                     s["bridge_clip"] = bclip
+                    s["bridge_narration"] = bool(bridge_narration)
                     _save_sb(task_id, data)
             if bclip and os.path.exists(bclip):
                 ordered_files.append(bclip)

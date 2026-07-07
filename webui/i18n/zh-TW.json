@@ -229,6 +229,8 @@
     "Hard cut (continuous)": "硬切（連續）",
     "Segment bridging help": "進場轉場=每段淡入/黑場等；溶接串場=前後段溶接過渡，銜接最自然；硬切=連續不打斷。",
     "Generate bridge scenes": "生成串場片段（依串接說明）",
-    "Generate bridge hint": "會依每段的「串接說明」生成一個過渡演繹片段（Veo 影片+旁白）插在段落之間，讓劇情銜接更完整。整體片長會變長、產製較久（每個串場約 1-3 分鐘，背景進行）。"
+    "Generate bridge hint": "會依每段的「串接說明」生成一個過渡演繹片段（Veo 影片+旁白）插在段落之間，讓劇情銜接更完整。整體片長會變長、產製較久（每個串場約 1-3 分鐘，背景進行）。",
+    "Bridge narration & subtitle": "串場加旁白與字幕",
+    "Bridge narration help": "預設關閉：串場只有過渡畫面（用畫面本身的環境音）。開啟才會把串接說明念出來並加字幕。"
   }
 }
