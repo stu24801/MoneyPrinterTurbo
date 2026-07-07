@@ -64,6 +64,35 @@ def _seg_appearance(seg, characters):
                      for c in present if c.get("appearance"))
 
 
+def _seg_beat(seg, which="last"):
+    """該段開頭(first)/結尾(last)的演出情境（角色＋情緒＋台詞），供串場承接
+    上一段的延續、接軌下一段的開場，讓轉場不突兀。無對白時退回場景描述。"""
+    seg = seg or {}
+    lines = voice.parse_dialogue_lines(seg.get("dialogue_text", "") or "")
+    if not lines:
+        return (seg.get("scene") or seg.get("video_prompt") or "").strip()[:60]
+    ln = lines[-1] if which == "last" else lines[0]
+    spk, emo, t = ln.get("speaker", ""), ln.get("emotion", ""), ln.get("line", "")
+    if spk:
+        return f"{spk}（{emo}）：{t}"
+    return t
+
+
+def _bridge_appearance(seg, next_seg, characters):
+    """串場涉及的角色外型（前後兩段對白中出現的角色，fallback 全部角色），
+    讓轉場畫面人物與前後段落設定一致。"""
+    if not characters:
+        return ""
+    names = set()
+    for txt in (seg.get("dialogue_text", ""), (next_seg or {}).get("dialogue_text", "")):
+        for ln in voice.parse_dialogue_lines(txt or ""):
+            if ln.get("speaker"):
+                names.add(ln["speaker"])
+    present = [c for c in characters if c.get("name") in names] or characters
+    return "；".join(f"{c.get('name','')}：{c.get('appearance','')}"
+                     for c in present if c.get("appearance"))
+
+
 def drama_video_prompt(seg):
     """Build a Veo prompt that makes the character PERFORM the dialogue (mouth
     moving, expression & gesture matching the lines and emotion), so the acting
@@ -225,28 +254,25 @@ def _generate_bridge(task_id, params, seg, idx, style, bridge_voice, narration=F
         return ""
     task_dir = utils.task_dir(task_id)
     uid = seg.get("uid", idx)
-    # 保持與上下段落一致：帶入場景銜接 + 角色外型 + 全片風格
+    # 保持與上下段落一致：場景銜接 + 前段延續情境 + 後段接軌情境 + 角色外型 + 風格
     from_scene = (seg.get("scene") or seg.get("video_prompt") or "").strip()
     to_scene = ((next_seg or {}).get("scene") or (next_seg or {}).get("video_prompt") or "").strip()
-    scene_ctx = ""
-    if from_scene or to_scene:
-        scene_ctx = f"從「{from_scene}」自然過渡到「{to_scene}」的鏡頭。"
-    appear = ""
-    if characters:
-        _spk = set()
-        for txt in (seg.get("dialogue_text", ""), (next_seg or {}).get("dialogue_text", "")):
-            for ln in voice.parse_dialogue_lines(txt or ""):
-                if ln.get("speaker"):
-                    _spk.add(ln["speaker"])
-        present = [c for c in characters if c.get("name") in _spk] or characters
-        appear = "；".join(f"{c.get('name','')}：{c.get('appearance','')}"
-                           for c in present if c.get("appearance"))
-        if appear:
-            appear = f"畫面中人物外型須與前後段落一致：{appear}。"
-    bridge_prompt = (f"電影感的轉場過渡畫面，銜接劇情：{note}。{scene_ctx}{appear}柔和運鏡，無文字")
+    from_beat = _seg_beat(seg, "last")          # 上一段結尾情境（延續）
+    to_beat = _seg_beat(next_seg, "first")      # 下一段開場情境（接軌）
+    ctx_parts = []
+    if from_scene or from_beat:
+        ctx_parts.append(f"承接上一段的情境（場景：{from_scene}；剛發生：{from_beat}）")
+    if to_scene or to_beat:
+        ctx_parts.append(f"自然接軌到下一段（場景：{to_scene}；即將發生：{to_beat}）")
+    scene_ctx = ("，".join(ctx_parts) + "。") if ctx_parts else ""
+    # 角色外型走 generate_single_video_llm 的 appearance 參數（格式統一）
+    appear = _bridge_appearance(seg, next_seg, characters)
+    bridge_prompt = (f"電影感的轉場過渡畫面，銜接劇情：{note}。{scene_ctx}"
+                     f"維持與前後段落一致的場景氛圍與人物，柔和運鏡，無文字")
     vclip = material.generate_single_video_llm(
         task_id, bridge_prompt, VideoAspect(_aspect_value(params)),
-        max_clip_duration=4, index=f"bridge-{uid}", style=style, reference_image="")
+        max_clip_duration=4, index=f"bridge-{uid}", style=style,
+        reference_image="", appearance=appear)
     if not vclip or not path.exists(vclip):
         return ""
 
