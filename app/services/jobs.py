@@ -48,19 +48,17 @@ def is_running(task_id: str) -> bool:
     s = read_status(task_id)
     if not s or s.get("status") != "running":
         return False
-    # If job.json says running but no live thread exists (e.g. after a restart),
-    # treat as stale/failed so the UI won't hang forever.
+    # A live job ALWAYS has its thread registered in this process. If job.json
+    # says "running" but there's no live thread (e.g. the container/process was
+    # restarted mid-job — threads don't survive that), it's stale: mark it as
+    # interrupted so the UI recovers immediately instead of hanging.
     th = _threads.get(task_id)
-    if th is None:
-        # Could be a thread from a previous run we lost track of; if the file is
-        # old and no thread, mark stale.
-        if time.time() - s.get("heartbeat", s.get("started_at", 0)) > 900:
-            s["status"] = "error"
-            s["error"] = "背景任務已中斷（伺服器可能重啟過），請重新產製"
-            _write(task_id, s)
-            return False
+    if th is not None and th.is_alive():
         return True
-    return th.is_alive()
+    s["status"] = "error"
+    s["error"] = "背景任務已中斷（伺服器重啟過），請重新產製（已完成的素材會沿用）"
+    _write(task_id, s)
+    return False
 
 
 def update_progress(task_id: str, done: int, total: int, note: str = ""):
