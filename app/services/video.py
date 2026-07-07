@@ -489,8 +489,49 @@ def generate_video(
     del video_clip
 
 
+_DEMUCS_MODEL = None
+
+
+def _strip_vocals(clip_path, work_dir):
+    """用 demucs 從影片音軌分離出「無人聲」的純環境音（去掉 Veo 生成的角色
+    對白語音），回傳環境音 wav 路徑；失敗回 None。供 TTS 配音模式使用，避免
+    Veo 對白與 TTS 配音疊音，只保留環境音效當背景。
+    走 demucs python API + soundfile 存檔（繞開 torchaudio.save 對 torchcodec
+    的依賴）。模型（htdemucs）快取於全域避免每段重載。"""
+    global _DEMUCS_MODEL
+    try:
+        import torch
+        import soundfile as sf
+        from demucs.pretrained import get_model
+        from demucs.apply import apply_model
+        from demucs.audio import AudioFile, convert_audio
+        if _DEMUCS_MODEL is None:
+            _DEMUCS_MODEL = get_model("htdemucs")
+            _DEMUCS_MODEL.eval()
+        model = _DEMUCS_MODEL
+        # 讀取影片音軌（AudioFile 走 ffmpeg 解碼，不依賴 torchaudio.load）
+        wav = AudioFile(clip_path).read(streams=0, samplerate=model.samplerate,
+                                        channels=model.audio_channels)
+        ref = wav.mean(0)
+        wav = (wav - ref.mean()) / (ref.std() + 1e-8)
+        with torch.no_grad():
+            sources = apply_model(model, wav[None], device="cpu", progress=False)[0]
+        sources = sources * ref.std() + ref.mean()
+        vi = model.sources.index("vocals")
+        no_vocals = sum(sources[i] for i in range(len(model.sources)) if i != vi)
+        out = os.path.join(work_dir, "_no_vocals.wav")
+        sf.write(out, no_vocals.T.cpu().numpy(), model.samplerate)
+        if os.path.exists(out):
+            logger.info("demucs: Veo 對白人聲已移除，保留環境音效")
+            return out
+        return None
+    except Exception as e:
+        logger.warning(f"vocal-strip skipped: {e}")
+        return None
+
+
 def compose_segment_video(clip_path, audio_path, subtitle_path, output_file, params,
-                          ambient_volume=0.12, min_duration=0):
+                          ambient_volume=0.12, min_duration=0, strip_vocals=False):
     """Compose ONE storyboard segment so it performs for the FULL narration:
     - the clip's motion plays once; if shorter than the voiceover it HOLDS the
       last frame (no 4-second looping); if longer it is trimmed to the voiceover.
@@ -549,12 +590,20 @@ def compose_segment_video(clip_path, audio_path, subtitle_path, output_file, par
 
     # audio
     if _has_voice:
-        # 有旁白：旁白為主 + 原生環境音低音量混入
+        # 有旁白（TTS 配音）：旁白為主 + 環境音混入。strip_vocals 時先用 demucs
+        # 移除 Veo 影片中的角色對白人聲、只留環境音效，避免與 TTS 配音疊音。
         audio_layers = [voice]
         if native_audio is not None:
             try:
-                amb = native_audio.subclipped(0, min(native_audio.duration, target))
-                amb = amb.with_effects([afx.MultiplyVolume(ambient_volume)])
+                _amb_path = _strip_vocals(clip_path, output_dir) if strip_vocals else None
+                if _amb_path:
+                    _af = AudioFileClip(_amb_path)
+                    # 已去人聲 → 純環境音，無疊音風險，音量可提高讓環境音效清楚
+                    amb = _af.subclipped(0, min(_af.duration, target)).with_effects(
+                        [afx.MultiplyVolume(0.6)])
+                else:
+                    amb = native_audio.subclipped(0, min(native_audio.duration, target)).with_effects(
+                        [afx.MultiplyVolume(ambient_volume)])
                 audio_layers.append(amb)
             except Exception as e:
                 logger.warning(f"ambient audio skipped: {e}")

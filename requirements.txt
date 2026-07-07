@@ -15,3 +15,10 @@ python-multipart==0.0.19
 pyyaml
 requests>=2.31.0
 pydub
+soundfile
+
+# 人聲分離（TTS 配音模式去除 Veo 對白、只留環境音效，避免疊音）。
+# torch 需用 CPU wheel，勿讓 pip 拉 CUDA 巨包，安裝：
+#   pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+#   pip install demucs==4.0.1 soundfile
+# demucs 首次執行會下載 htdemucs 模型（~80MB）到 ~/.cache/torch。

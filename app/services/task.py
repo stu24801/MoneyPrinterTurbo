@@ -937,6 +937,9 @@ def generate_segments(task_id, params: VideoParams, segments: list, voice_map: d
                 output_file=seg_out,
                 params=seg_params,
                 min_duration=seg_dur,  # 段落至少達到設定秒數
+                # 戲劇 TTS 模式：Veo 影片含角色對白人聲，去人聲只留環境音，
+                # 避免與 TTS 配音疊音（subtitle_only 用 Veo 原音、不需去）
+                strip_vocals=(drama and not subtitle_only),
             )
         except Exception as e:
             logger.error(f"segment {idx + 1}: compose failed: {e}")
