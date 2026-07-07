@@ -441,6 +441,7 @@ def generate_single_video_llm(
     style: str = "",
     reference_image: str = "",
     note_out: dict = None,
+    appearance: str = "",
 ) -> str:
     """Generate ONE storyboard segment video with Veo. When reference_image (a
     path to that segment's storyboard image) is given, image-to-video is used:
@@ -459,8 +460,12 @@ def generate_single_video_llm(
     ratio = {"landscape": "16:9", "portrait": "9:16", "square": "16:9"}.get(aspect.name, "9:16")
     duration = max((d for d in (4, 6, 8) if d <= max_clip_duration), default=4)
     style_part = f" Visual style: {style.strip()}." if (style or "").strip() else ""
+    # 人物外型設定注入：讓 Veo 生成的角色（尤其純文字 text-to-video fallback、
+    # 無參考圖時）嚴格符合上方角色設定，維持長相一致。
+    appear_part = (f" 畫面中人物外型務必嚴格符合以下設定並保持一致：{appearance.strip()}."
+                   if (appearance or "").strip() else "")
     full_prompt = (
-        f"{prompt.strip()}.{style_part} Photorealistic, cinematic quality, smooth camera motion. "
+        f"{prompt.strip()}.{style_part}{appear_part} Photorealistic, cinematic quality, smooth camera motion. "
         "No text, no watermark, no captions, no subtitles."
     )
     payload = {

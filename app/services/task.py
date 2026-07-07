@@ -52,6 +52,18 @@ def _aspect_value(params):
     return a.value if hasattr(a, "value") else a
 
 
+def _seg_appearance(seg, characters):
+    """該段對白中出現的角色外型描述（fallback: 全部角色），注入 Veo 影片/
+    圖片 prompt，讓生成的人物嚴格符合角色設定參照、維持長相一致。"""
+    if not characters:
+        return ""
+    names = {ln["speaker"] for ln in voice.parse_dialogue_lines(
+        seg.get("dialogue_text", "") or "") if ln.get("speaker")}
+    present = [c for c in characters if c.get("name") in names] or characters
+    return "；".join(f"{c.get('name','')}：{c.get('appearance','')}"
+                     for c in present if c.get("appearance"))
+
+
 def drama_video_prompt(seg):
     """Build a Veo prompt that makes the character PERFORM the dialogue (mouth
     moving, expression & gesture matching the lines and emotion), so the acting
@@ -98,9 +110,15 @@ def job_generate_clip(task_id, uid, prompt, aspect_value, max_dur, style, refere
     """Generate one segment's Veo clip (image-to-video if reference_image) by uid."""
     aspect = VideoAspect(aspect_value)
     _note = {}
+    # 戲劇模式：帶入該段角色外型，讓生成人物符合設定參照（尤其圖被拒改
+    # text-to-video 時，無參考圖全靠文字，更需要外型描述維持一致）
+    _sb = _load_sb(task_id)
+    _seg = next((x for x in _sb.get("segments", []) if x.get("uid") == uid), {})
+    _appear = _seg_appearance(_seg, _sb.get("characters", []))
     vid = material.generate_single_video_llm(
         task_id, prompt, aspect, max_clip_duration=max_dur, index=uid,
-        style=style, reference_image=reference_image or "", note_out=_note)
+        style=style, reference_image=reference_image or "", note_out=_note,
+        appearance=_appear)
     if not vid:
         raise RuntimeError("video generation returned empty")
     data = _load_sb(task_id)
@@ -143,13 +161,7 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
                             or s.get("scene") or s.get("dialogue_text")
                             or s.get("script_chunk") or "cinematic scene")
                 # 戲劇模式：帶入該段角色外型，維持一致長相
-                _appear = ""
-                if characters:
-                    _spk = {ln["speaker"] for ln in voice.parse_dialogue_lines(
-                        s.get("dialogue_text", "") or "") if ln.get("speaker")}
-                    _present = [c for c in characters if c.get("name") in _spk] or characters
-                    _appear = "；".join(f"{c.get('name','')}：{c.get('appearance','')}"
-                                        for c in _present if c.get("appearance"))
+                _appear = _seg_appearance(s, characters)
                 _img = material.generate_single_image_llm(
                     task_id, _iprompt, VideoAspect(_aspect_value(params)),
                     index=s.get("uid", idx), style=style, appearance=_appear)
@@ -176,7 +188,8 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
                 vid = material.generate_single_video_llm(
                     task_id, vdir, VideoAspect(_aspect_value(params)),
                     max_clip_duration=_seg_dur, index=s.get("uid", idx),
-                    style=style, reference_image=image, note_out=_note)
+                    style=style, reference_image=image, note_out=_note,
+                    appearance=_seg_appearance(s, characters))
                 if vid:
                     data = _load_sb(task_id)
                     segs = data.get("segments", [])
