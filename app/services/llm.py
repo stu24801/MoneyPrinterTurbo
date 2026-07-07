@@ -329,8 +329,18 @@ def _generate_response(prompt: str) -> str:
 
 
 def generate_script(
-    video_subject: str, language: str = "", paragraph_number: int = 1
+    video_subject: str, language: str = "", paragraph_number: int = 1,
+    target_duration: int = 0,
 ) -> str:
+    duration_constraint = ""
+    if target_duration and target_duration > 0:
+        # ~4 chars/sec for CJK narration, ~2.5 words/sec otherwise
+        duration_constraint = (
+            f"\n9. the script will be narrated as a {target_duration}-second video. "
+            f"Strictly limit the total length so the narration fits: about "
+            f"{target_duration * 4} characters if writing in Chinese/Japanese/Korean, "
+            f"or about {int(target_duration * 2.5)} words otherwise. Do not exceed this."
+        )
     prompt = f"""
 # Role: Video Script Generator
 
@@ -345,7 +355,7 @@ Generate a script for a video, depending on the subject of the video.
 5. only return the raw content of the script.
 6. do not include "voiceover", "narrator" or similar indicators of what should be spoken at the beginning of each paragraph or line.
 7. you must not mention the prompt, or anything about the script itself. also, never talk about the amount of paragraphs or lines. just write the script.
-8. respond in the same language as the video subject.
+8. respond in the same language as the video subject.{duration_constraint}
 
 # Initialization:
 - video subject: {video_subject}
@@ -464,6 +474,157 @@ Please note that you must use English for generating video search terms; Chinese
 
     logger.success(f"completed: \n{search_terms}")
     return search_terms
+
+
+def generate_drama_storyboard(video_script: str, n: int, target_duration: int = 0) -> dict:
+    """Drama (character performance) storyboard: the outline is only a structural
+    reference — output a cast of characters and per-segment plot with emotional
+    dialogue lines. Returns {"style", "characters": [{name, gender, desc}],
+    "segments": [{scene, dialogue_text, must_say, transition_note,
+    video_direction, transition_effect}]}."""
+    fallback = {"style": "", "characters": [], "segments": [
+        {"scene": "", "dialogue_text": "", "must_say": "", "transition_note": "",
+         "video_direction": "", "transition_effect": "none"} for _ in range(n)]}
+    if n <= 0:
+        return fallback
+    dur_hint = ""
+    if target_duration:
+        per = max(4, target_duration // max(1, n))
+        dur_hint = (f"\n6. The whole film is about {target_duration} seconds; each segment's "
+                    f"dialogue must be speakable within ~{per} seconds "
+                    f"(≤ {per * 4} Chinese characters of dialogue per segment).")
+    prompt = f"""
+# Role: Short-Drama Screenwriter & Storyboard Designer
+
+## Goals:
+Turn the outline below into a CHARACTER-PERFORMED short drama (NOT documentary narration). The outline is only a structural reference. Design:
+1. "style": one film-level visual aesthetic (color palette, photography style, lighting mood).
+2. "characters": 2-4 recurring characters, each {{"name": short name, "gender": "male"|"female", "desc": one-line persona}}.
+3. exactly {n} "segments", each:
+   - "scene": one sentence of what happens in this scene (plot beat).
+   - "dialogue_text": the acted dialogue, one line per utterance, EXACT format per line: 角色名（情感）：台詞  — emotion from: 平靜, 開心, 激動, 悲傷, 嚴肅, 溫柔, 疑惑, 緊張. 1-3 lines per segment. Dialogue must carry the plot and feel like real spoken drama, NOT read-aloud narration.
+   - "must_say": the one key line (quoted from the dialogue) that must be kept.
+   - "video_direction": cinematic direction of the scene showing the characters acting (setting, character actions/expressions, camera movement, lighting), matching the style.
+   - "transition_effect": one of "none", "fade_in", "fade", "slide_in" — how the film enters this segment.
+
+## Constrains:
+1. Return ONLY a json object {{"style": "...", "characters": [...], "segments": [...]}} with exactly {n} segments.
+2. Write everything in the same language as the outline; "transition_effect" and "gender" use the English tokens.
+3. Characters must stay consistent across segments; use only declared character names in dialogue_text.
+4. Keep "style" under 50 characters; "scene" under 40; "video_direction" under 90.
+5. No narrator, no voice-over lines, no text overlays in video_direction.{dur_hint}
+
+## Output Example:
+{{"style": "霓虹暖橙色調，夜市街頭電影感，淺景深", "characters": [{{"name": "小婷", "gender": "female", "desc": "第一次逛夜市的大學生，好奇心旺盛"}}, {{"name": "阿伯", "gender": "male", "desc": "賣蚵仔煎三十年的老攤主，豪爽健談"}}], "segments": [{{"scene": "小婷第一次踏進熱鬧的夜市", "dialogue_text": "小婷（開心）：哇，這裡也太熱鬧了吧！\n阿伯（豪爽）：妹妹，來呷看覓，阿伯的蚵仔煎全夜市上出名！", "must_say": "阿伯的蚵仔煎全夜市上出名", "video_direction": "夜市入口人潮湧動，小婷睜大眼睛環顧四周，鏡頭跟隨她穿過攤位，暖黃燈泡串光影", "transition_effect": "fade_in"}}]}}
+
+## Outline (structural reference only)
+{video_script}
+""".strip()
+    _valid_fx = {"none", "fade_in", "fade", "slide_in"}
+    for _ in range(_max_retries):
+        try:
+            response = _generate_response(prompt)
+            if "Error: " in response:
+                continue
+            m = re.search(r"\{.*\}", response, re.DOTALL)
+            if not m:
+                continue
+            data = json.loads(m.group(0))
+            chars = []
+            for c in (data.get("characters") or [])[:4]:
+                if isinstance(c, dict) and c.get("name"):
+                    chars.append({"name": str(c["name"])[:20],
+                                  "gender": "male" if str(c.get("gender", "")).lower().startswith("m") else "female",
+                                  "desc": str(c.get("desc", ""))[:80]})
+            arr = data.get("segments", [])
+            segs = []
+            for i in range(n):
+                item = arr[i] if i < len(arr) and isinstance(arr[i], dict) else {}
+                fx = str(item.get("transition_effect", "none")).strip()
+                segs.append({
+                    "scene": str(item.get("scene", ""))[:120],
+                    "dialogue_text": str(item.get("dialogue_text", ""))[:600],
+                    "must_say": str(item.get("must_say", ""))[:120],
+                    "transition_note": str(item.get("scene", ""))[:120],
+                    "video_direction": str(item.get("video_direction", ""))[:240],
+                    "transition_effect": fx if fx in _valid_fx else "none",
+                })
+            if not chars or not any(s["dialogue_text"] for s in segs):
+                continue
+            return {"style": str(data.get("style", ""))[:160], "characters": chars, "segments": segs}
+        except Exception as e:
+            logger.warning(f"drama storyboard generation failed: {e}")
+    return fallback
+
+
+def generate_storyboard_notes(video_script: str, segments: List[str]) -> dict:
+    """Generate the film-level aesthetic style plus per-segment storyboard
+    annotations (transition note, must-say key sentence, video direction and a
+    concrete transition effect). Returns {"style": str, "notes": [dict, ...]};
+    falls back to empty values on any failure."""
+    n = len(segments)
+    fallback = {"style": "", "notes": [
+        {"transition_note": "", "must_say": "", "video_direction": "", "transition_effect": "none"}
+        for _ in range(n)]}
+    if not n:
+        return fallback
+    seg_lines = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(segments))
+    prompt = f"""
+# Role: Film Storyboard & Narrative Board Designer
+
+## Goals:
+First, define ONE film-level "style": the unified visual aesthetic of the whole film (color palette, photography/art style, lighting mood), so every segment looks coherent.
+Then, for each numbered segment of the video script below, produce:
+1. "transition_note": one short sentence describing how this segment connects to the NEXT segment (narrative flow). For the last segment, describe how it closes the video.
+2. "must_say": the single most important key sentence of this segment that MUST be spoken, quoted or minimally condensed from the segment text itself.
+3. "video_direction": a cinematic video direction script for this segment — describe the concrete scene, subject action, camera movement (e.g. slow pan, dolly-in, aerial), lighting and mood, matching the segment content and the film style. This will drive an AI video generator.
+4. "transition_effect": how the film should transition INTO this segment, chosen from exactly: "none" (hard cut), "fade_in" (segment fades in), "fade" (dip to black between segments), "slide_in" (new segment slides in). Choose based on the narrative relationship with the previous segment (e.g. "fade" for a time/era jump, "none"/"fade_in" for continuous flow). The first segment should be "fade_in" or "none".
+
+## Constrains:
+1. Return ONLY a json object: {{"style": "...", "segments": [ ... ]}} with exactly {n} objects in "segments", in segment order.
+2. Each segment object has exactly the keys "transition_note", "must_say", "video_direction" and "transition_effect".
+3. Write "style" and all text values in the same language as the script; "transition_effect" must be one of the four English tokens.
+4. Keep "transition_note" and "must_say" under 40 characters if the script is Chinese (15 words otherwise); "video_direction" under 80 characters (30 words otherwise); "style" under 50 characters (20 words otherwise).
+5. "video_direction" must describe visible scenes only — no text overlays, no narration content.
+
+## Output Example:
+{{"style": "溫暖琥珀色調，紀實攝影風格，柔和自然光，淺景深", "segments": [{{"transition_note": "由起源帶入現代發展", "must_say": "咖啡起源於九世紀的衣索比亞", "video_direction": "衣索比亞高原晨霧中，鏡頭緩慢推進至結滿紅色果實的咖啡樹，牧羊人驚訝觀察羊群，暖色調日出光", "transition_effect": "fade_in"}}]}}
+
+## Video Script
+{video_script}
+
+## Segments
+{seg_lines}
+""".strip()
+    for _ in range(_max_retries):
+        try:
+            response = _generate_response(prompt)
+            if "Error: " in response:
+                continue
+            m = re.search(r"\{.*\}", response, re.DOTALL)
+            if not m:
+                continue
+            data = json.loads(m.group(0))
+            if isinstance(data, list):  # tolerate old array-shaped replies
+                data = {"style": "", "segments": data}
+            if not isinstance(data, dict):
+                continue
+            arr = data.get("segments", [])
+            _valid_fx = {"none", "fade_in", "fade", "slide_in"}
+            notes = []
+            for i in range(n):
+                item = arr[i] if i < len(arr) and isinstance(arr[i], dict) else {}
+                fx = str(item.get("transition_effect", "none")).strip()
+                notes.append({
+                    "transition_note": str(item.get("transition_note", ""))[:120],
+                    "must_say": str(item.get("must_say", ""))[:120],
+                    "video_direction": str(item.get("video_direction", ""))[:240],
+                    "transition_effect": fx if fx in _valid_fx else "none",
+                })
+            return {"style": str(data.get("style", ""))[:160], "notes": notes}
+        except Exception as e:
+            logger.warning(f"storyboard notes generation failed: {e}")
+    return fallback
 
 
 if __name__ == "__main__":

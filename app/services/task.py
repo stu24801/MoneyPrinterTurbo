@@ -1,3 +1,4 @@
+import json
 import math
 import os.path
 import re
@@ -7,7 +8,7 @@ from loguru import logger
 
 from app.config import config
 from app.models import const
-from app.models.schema import VideoConcatMode, VideoParams
+from app.models.schema import MaterialInfo, VideoConcatMode, VideoParams
 from app.services import llm, material, subtitle, video, voice
 from app.services import state as sm
 from app.utils import utils
@@ -21,6 +22,7 @@ def generate_script(task_id, params):
             video_subject=params.video_subject,
             language=params.video_language,
             paragraph_number=params.paragraph_number,
+            target_duration=getattr(params, "video_total_duration", 0) or 0,
         )
     else:
         logger.debug(f"video script: \n{video_script}")
@@ -160,6 +162,42 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
 
 
 def get_video_materials(task_id, params, video_terms, audio_duration):
+    if params.video_source == "llm-video":
+        logger.info("\n\n## generating video clips via Veo (LLM proxy video model)")
+        materials = material.generate_videos_llm(
+            task_id=task_id,
+            search_terms=video_terms,
+            video_aspect=params.video_aspect,
+            audio_duration=audio_duration * params.video_count,
+            max_clip_duration=params.video_clip_duration,
+        )
+        if not materials:
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+            logger.error("failed to generate video clips via Veo.")
+            return None
+        # Veo clips are already video files — no image preprocessing needed
+        return [material_info.url for material_info in materials]
+    if params.video_source == "llm":
+        logger.info("\n\n## generating image materials via LLM image model")
+        materials = material.generate_images_llm(
+            task_id=task_id,
+            search_terms=video_terms,
+            video_aspect=params.video_aspect,
+            audio_duration=audio_duration * params.video_count,
+            max_clip_duration=params.video_clip_duration,
+        )
+        if not materials:
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+            logger.error("failed to generate images via LLM image model.")
+            return None
+        materials = video.preprocess_video(
+            materials=materials, clip_duration=params.video_clip_duration
+        )
+        if not materials:
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+            logger.error("no valid generated images after preprocessing.")
+            return None
+        return [material_info.url for material_info in materials]
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
         materials = video.preprocess_video(
@@ -362,6 +400,297 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs
     )
+    return kwargs
+
+
+def storyboard_start(task_id, params: VideoParams):
+    """Storyboard phase: script → terms → materials only. Voiceover and
+    subtitles are deferred to the segment-generation phase."""
+    logger.info(f"start storyboard task: {task_id}")
+    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
+    if type(params.video_concat_mode) is str:
+        params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
+
+    video_script = generate_script(task_id, params)
+    if not video_script or "Error: " in video_script:
+        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+        return None
+    video_terms = ""
+    if params.video_source != "local":
+        video_terms = generate_terms(task_id, params, video_script)
+        if not video_terms:
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+            return None
+    save_script_data(task_id, video_script, video_terms, params)
+
+    # No TTS yet — narration duration: use the user's target total duration if
+    # set, otherwise estimate from script length (~4 chars/sec for CJK).
+    target_total = getattr(params, "video_total_duration", 0) or 0
+    if target_total > 0:
+        est_duration = float(target_total)
+    else:
+        ascii_ratio = sum(1 for c in video_script if ord(c) < 128) / max(1, len(video_script))
+        if ascii_ratio > 0.7:
+            est_duration = max(10.0, len(video_script.split()) / 2.5)
+        else:
+            est_duration = max(10.0, len(video_script) / 4.0)
+
+    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
+    if params.video_source == "llm":
+        # Text-first storyboard: no images are generated here. Segment count is
+        # sized from the estimated duration.
+        segment_count = max(1, min(8, math.ceil(
+            est_duration * params.video_count / max(1, params.video_clip_duration))))
+        result = {"script": video_script, "terms": video_terms,
+                  "materials": [], "segment_count": segment_count}
+        # Drama mode: build the character cast + per-segment dialogue up front,
+        # so the board can present characters and editable lines.
+        if getattr(params, "presentation_mode", "narration") == "drama":
+            drama = llm.generate_drama_storyboard(
+                video_script, segment_count, target_duration=int(target_total))
+            result["drama"] = drama
+        sm.state.update_task(
+            task_id, state=const.TASK_STATE_COMPLETE, progress=100, materials=[]
+        )
+        return result
+    materials = get_video_materials(task_id, params, video_terms, est_duration)
+    if not materials:
+        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+        return None
+    sm.state.update_task(
+        task_id, state=const.TASK_STATE_COMPLETE, progress=100, materials=materials
+    )
+    return {"script": video_script, "terms": video_terms, "materials": materials}
+
+
+def _srt_ts(seconds: float) -> str:
+    ms = int(round(seconds * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def synthesize_drama_segment(task_dir, idx, dialogue_text, voice_map, subtitle_enabled):
+    """Voice a character-performance segment line-by-line: each utterance uses
+    its speaker's voice and an emotion-adjusted rate, then the clips are
+    concatenated. Returns (audio_file, srt_file) or (None, "")."""
+    from pydub import AudioSegment
+
+    lines = voice.parse_dialogue_lines(dialogue_text)
+    if not lines:
+        return None, ""
+    default_voice = next(iter(voice_map.values()), "zh-TW-HsiaoChenNeural")
+    combined = AudioSegment.empty()
+    srt_entries = []
+    cursor = 0.0
+    for li, ln in enumerate(lines):
+        spk, emo, text = ln["speaker"], ln["emotion"], ln["line"]
+        if not text:
+            continue
+        vname = voice_map.get(spk, default_voice)
+        rate = voice.emotion_to_rate(emo)
+        part_f = path.join(task_dir, f"seg-{idx}-line-{li}.mp3")
+        sm = voice.tts(text=text, voice_name=vname, voice_rate=rate, voice_file=part_f)
+        if sm is None or not path.exists(part_f):
+            logger.warning(f"segment {idx + 1} line {li + 1}: tts failed ({spk})")
+            continue
+        seg_audio = AudioSegment.from_file(part_f)
+        dur = len(seg_audio) / 1000.0
+        srt_entries.append((cursor, cursor + dur, (f"{spk}：" if spk else "") + text))
+        combined += seg_audio
+        combined += AudioSegment.silent(duration=250)  # small beat between lines
+        cursor += dur + 0.25
+        try:
+            os.remove(part_f)
+        except OSError:
+            pass
+    if len(combined) == 0:
+        return None, ""
+    audio_f = path.join(task_dir, f"seg-{idx}-audio.mp3")
+    combined.export(audio_f, format="mp3")
+    srt_f = ""
+    if subtitle_enabled and srt_entries:
+        srt_f = path.join(task_dir, f"seg-{idx}.srt")
+        with open(srt_f, "w", encoding="utf-8") as f:
+            for n, (st, et, txt) in enumerate(srt_entries, 1):
+                f.write(f"{n}\n{_srt_ts(st)} --> {_srt_ts(et)}\n{txt}\n\n")
+    return audio_f, srt_f
+
+
+def generate_segments(task_id, params: VideoParams, segments: list, voice_map: dict = None):
+    """Render one reviewable video per storyboard segment. In narration mode a
+    segment is voiced from script_chunk; in drama mode from dialogue_text, using
+    per-character voices and emotion. Returns segment paths ("" on failure)."""
+    import copy
+
+    task_dir = utils.task_dir(task_id)
+    seg_params = copy.deepcopy(params)
+    seg_params.bgm_type = ""  # bgm is mixed once at merge time, not per segment
+    if type(seg_params.video_concat_mode) is str:
+        seg_params.video_concat_mode = VideoConcatMode(seg_params.video_concat_mode)
+    drama = getattr(params, "presentation_mode", "narration") == "drama"
+
+    outputs = []
+    for i, seg in enumerate(segments):
+        idx = int(seg.get("index", i))
+        if drama:
+            chunk = (seg.get("dialogue_text") or "").strip()
+        else:
+            chunk = (seg.get("script_chunk") or "").strip()
+        clip = seg.get("clip") or ""
+        image = seg.get("image") or ""
+        if (not clip or not path.exists(clip)) and image and path.exists(image):
+            m = MaterialInfo()
+            m.provider = "llm"
+            m.url = image
+            pp = video.preprocess_video([m], clip_duration=params.video_clip_duration)
+            if pp:
+                clip = pp[0].url
+        if not chunk or not clip or not path.exists(clip):
+            logger.warning(f"segment {idx + 1}: missing script or clip, skipped")
+            outputs.append("")
+            continue
+        logger.info(f"\n\n## rendering segment {idx + 1} ({'drama' if drama else 'narration'})")
+        srt_f = ""
+        if drama:
+            audio_f, srt_f = synthesize_drama_segment(
+                task_dir, idx, chunk, voice_map or {}, params.subtitle_enabled)
+            if audio_f is None:
+                logger.error(f"segment {idx + 1}: drama tts failed")
+                outputs.append("")
+                continue
+        else:
+            audio_f = path.join(task_dir, f"seg-{idx}-audio.mp3")
+            sub_maker = voice.tts(
+                text=chunk,
+                voice_name=voice.parse_voice_name(params.voice_name),
+                voice_rate=params.voice_rate,
+                voice_file=audio_f,
+            )
+            if sub_maker is None:
+                logger.error(f"segment {idx + 1}: tts failed")
+                outputs.append("")
+                continue
+            if params.subtitle_enabled:
+                srt_f = path.join(task_dir, f"seg-{idx}.srt")
+                try:
+                    voice.create_subtitle(sub_maker=sub_maker, text=chunk, subtitle_file=srt_f)
+                except Exception as e:
+                    logger.warning(f"segment {idx + 1}: subtitle failed: {e}")
+                if not path.exists(srt_f):
+                    srt_f = ""
+        combined_f = path.join(task_dir, f"seg-{idx}-combined.mp4")
+        video.combine_videos(
+            combined_video_path=combined_f,
+            video_paths=[clip],
+            audio_file=audio_f,
+            video_aspect=params.video_aspect,
+            video_concat_mode=VideoConcatMode.sequential,
+            video_transition_mode=params.video_transition_mode,
+            max_clip_duration=params.video_clip_duration,
+            threads=params.n_threads,
+        )
+        seg_out = path.join(task_dir, f"segment-{idx + 1}.mp4")
+        video.generate_video(
+            video_path=combined_f,
+            audio_path=audio_f,
+            subtitle_path=srt_f,
+            output_file=seg_out,
+            params=seg_params,
+        )
+        outputs.append(seg_out if path.exists(seg_out) else "")
+    return outputs
+
+
+def merge_segments(task_id, params: VideoParams, segment_files: list, transitions: list = None):
+    """Merge confirmed segment videos into the final video. transitions (from
+    each segment's connecting instruction) drive the effect between segments."""
+    paired = [(f, (transitions or ["none"] * len(segment_files))[i] if transitions and i < len(transitions) else "none")
+              for i, f in enumerate(segment_files) if f and path.exists(f)]
+    if not paired:
+        logger.error("merge_segments: no valid segment videos")
+        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+        return None
+    segment_files = [p[0] for p in paired]
+    seg_transitions = [p[1] for p in paired]
+    final_path = path.join(utils.task_dir(task_id), "final-1.mp4")
+    try:
+        video.merge_segment_videos(segment_files, final_path, params, transitions=seg_transitions)
+    except Exception as e:
+        logger.error(f"merge_segments failed: {e}")
+        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+        return None
+    kwargs = {"videos": [final_path], "combined_videos": segment_files}
+    sm.state.update_task(task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs)
+    return kwargs
+
+
+def finalize(task_id, params: VideoParams, materials: list, video_script: str = ""):
+    """Synthesize the final video for a storyboard task previously run with
+    stop_at="materials". If video_script differs from the saved one (storyboard
+    edits), the voiceover and subtitles are regenerated first."""
+    task_dir = utils.task_dir(task_id)
+
+    saved_script, script_data = "", {}
+    script_file = path.join(task_dir, "script.json")
+    try:
+        with open(script_file, "r", encoding="utf-8") as f:
+            script_data = json.loads(f.read())
+        saved_script = script_data.get("script", "")
+    except Exception:
+        pass
+
+    audio_file = path.join(task_dir, "audio.mp3")
+    subtitle_path = path.join(task_dir, "subtitle.srt")
+    script_changed = bool(video_script) and video_script.strip() != (saved_script or "").strip()
+
+    if script_changed or not path.exists(audio_file):
+        effective_script = video_script or saved_script
+        if not effective_script:
+            logger.error("finalize: no script available to (re)generate audio")
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+            return None
+        logger.info("finalize: script edited — regenerating voiceover and subtitles")
+        sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
+        audio_file, audio_duration, sub_maker = generate_audio(
+            task_id, params, effective_script
+        )
+        if not audio_file:
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+            return None
+        subtitle_path = generate_subtitle(
+            task_id, params, effective_script, sub_maker, audio_file
+        )
+        if script_data:
+            script_data["script"] = effective_script
+            with open(script_file, "w", encoding="utf-8") as f:
+                f.write(utils.to_json(script_data))
+        saved_script = effective_script
+
+    if not (params.subtitle_enabled and subtitle_path and path.exists(subtitle_path)):
+        subtitle_path = ""
+    video_script = saved_script
+
+    if type(params.video_concat_mode) is str:
+        params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
+
+    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=50)
+    final_video_paths, combined_video_paths = generate_final_videos(
+        task_id, params, materials, audio_file, subtitle_path
+    )
+    if not final_video_paths:
+        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+        return None
+
+    logger.success(f"storyboard task {task_id} finalized, {len(final_video_paths)} videos.")
+    kwargs = {
+        "videos": final_video_paths,
+        "combined_videos": combined_video_paths,
+        "script": video_script,
+        "materials": materials,
+    }
+    sm.state.update_task(task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs)
     return kwargs
 
 

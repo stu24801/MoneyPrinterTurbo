@@ -1,5 +1,9 @@
+import hashlib
+import json
+import math
 import os
 import platform
+import re
 import sys
 from uuid import uuid4
 
@@ -22,13 +26,13 @@ from app.models.schema import (
     VideoParams,
     VideoTransitionMode,
 )
-from app.services import llm, voice
+from app.services import llm, material, video, voice
 from app.services import task as tm
 from app.utils import utils
 
 st.set_page_config(
-    page_title="MoneyPrinterTurbo",
-    page_icon="🤖",
+    page_title="短片生成器",
+    page_icon="🎬",
     layout="wide",
     initial_sidebar_state="auto",
     menu_items={
@@ -50,6 +54,11 @@ h1 {
 """
 st.markdown(streamlit_style, unsafe_allow_html=True)
 
+from webui import auth
+
+auth.require_login()
+auth.render_user_sidebar()
+
 # 定义资源目录
 font_dir = os.path.join(root_dir, "resource", "fonts")
 song_dir = os.path.join(root_dir, "resource", "songs")
@@ -67,6 +76,18 @@ if "video_terms" not in st.session_state:
 if "ui_language" not in st.session_state:
     st.session_state["ui_language"] = config.ui.get("language", system_locale)
 
+# 套用「從產製歷史載入」的待載入資料——必須在表單元件渲染前執行，
+# 否則帶 key 的 widget（如 video_subject_input）無法被程式設定。
+_pending = st.session_state.pop("_pending_load", None)
+if _pending:
+    st.session_state["video_subject"] = _pending.get("subject", "")
+    st.session_state["video_subject_input"] = _pending.get("subject", "")
+    st.session_state["video_script"] = _pending.get("script", "")
+    _terms = _pending.get("terms", "")
+    if isinstance(_terms, list):
+        _terms = ", ".join(str(t) for t in _terms)
+    st.session_state["video_terms"] = _terms
+
 # 加载语言文件
 locales = utils.load_locales(i18n_dir)
 
@@ -74,7 +95,7 @@ locales = utils.load_locales(i18n_dir)
 title_col, lang_col = st.columns([3, 1])
 
 with title_col:
-    st.title(f"MoneyPrinterTurbo v{config.project_version}")
+    st.title(f"🎬 短片生成器 v{config.project_version}")
 
 with lang_col:
     display_languages = []
@@ -502,9 +523,16 @@ with left_panel:
         for code in support_locales:
             video_languages.append((code, code))
 
+        # Default script language: zh-TW when the UI is in Traditional Chinese,
+        # so generated scripts (and thus subtitles) are Traditional Chinese.
+        default_lang_index = 0
+        if st.session_state.get("ui_language", "").startswith("zh-TW"):
+            default_lang_index = next(
+                (i for i, v in enumerate(video_languages) if v[1] == "zh-TW"), 0
+            )
         selected_index = st.selectbox(
             tr("Script Language"),
-            index=0,
+            index=default_lang_index,
             options=range(
                 len(video_languages)
             ),  # Use the index as the internal option value
@@ -556,6 +584,8 @@ with middle_panel:
             (tr("Random"), "random"),
         ]
         video_sources = [
+            (tr("AI Generated Images"), "llm"),
+            (tr("AI Generated Videos"), "llm-video"),
             (tr("Pexels"), "pexels"),
             (tr("Pixabay"), "pixabay"),
             (tr("Local file"), "local"),
@@ -636,6 +666,24 @@ with middle_panel:
         params.video_clip_duration = st.selectbox(
             tr("Clip Duration"), options=[2, 3, 4, 5, 6, 7, 8, 9, 10], index=1
         )
+        _pm_opts = ["narration", "drama"]
+        _saved_pm = config.ui.get("presentation_mode", "narration")
+        params.presentation_mode = st.selectbox(
+            tr("Presentation Mode"),
+            options=_pm_opts,
+            index=_pm_opts.index(_saved_pm) if _saved_pm in _pm_opts else 0,
+            format_func=lambda x: tr("Narration mode") if x == "narration" else tr("Drama mode"),
+        )
+        config.ui["presentation_mode"] = params.presentation_mode
+        _dur_opts = [0, 30, 45, 60, 90, 120, 180]
+        _saved_total = config.ui.get("video_total_duration", 60)
+        params.video_total_duration = st.selectbox(
+            tr("Total Video Duration"),
+            options=_dur_opts,
+            index=_dur_opts.index(_saved_total) if _saved_total in _dur_opts else 3,
+            format_func=lambda x: tr("Auto by script") if x == 0 else f"{x} " + tr("seconds"),
+        )
+        config.ui["video_total_duration"] = params.video_total_duration
         params.video_count = st.selectbox(
             tr("Number of Videos Generated Simultaneously"),
             options=[1, 2, 3, 4, 5],
@@ -651,6 +699,14 @@ with middle_panel:
             ("siliconflow", "SiliconFlow TTS"),
             ("gemini-tts", "Google Gemini TTS"),
         ]
+        # 只顯示已設定 API key 的伺服器（未設 key 的選了必失敗）
+        _tts_available = {
+            "azure-tts-v1": True,  # edge 免費，不需 key
+            "azure-tts-v2": bool(config.azure.get("speech_key", "")),
+            "siliconflow": bool(config.siliconflow.get("api_key", "")),
+            "gemini-tts": bool(config.app.get("gemini_api_key", "")),
+        }
+        tts_servers = [s for s in tts_servers if _tts_available.get(s[0], False)]
 
         # 获取保存的TTS服务器，默认为v1
         saved_tts_server = config.ui.get("tts_server", "azure-tts-v1")
@@ -989,16 +1045,14 @@ with right_panel:
                     config.save_config()
                     st.success(tr("Pixabay API Key deleted successfully"))
 
-start_button = st.button(tr("Generate Video"), use_container_width=True, type="primary")
-if start_button:
-    config.save_config()
-    task_id = str(uuid4())
+def _validate_generation_params():
+    """Shared pre-generation validations. Calls st.stop() when invalid."""
     if not params.video_subject and not params.video_script:
         st.error(tr("Video Script and Subject Cannot Both Be Empty"))
         scroll_to_bottom()
         st.stop()
 
-    if params.video_source not in ["pexels", "pixabay", "local"]:
+    if params.video_source not in ["pexels", "pixabay", "local", "llm", "llm-video"]:
         st.error(tr("Please Select a Valid Video Source"))
         scroll_to_bottom()
         st.stop()
@@ -1012,6 +1066,20 @@ if start_button:
         st.error(tr("Please Enter the Pixabay API Key"))
         scroll_to_bottom()
         st.stop()
+
+
+btn_generate_col, btn_storyboard_col = st.columns(2)
+start_button = btn_generate_col.button(
+    tr("Generate Video"), use_container_width=True, type="primary"
+)
+storyboard_button = btn_storyboard_col.button(
+    tr("Create Storyboard"), use_container_width=True
+)
+
+if start_button:
+    config.save_config()
+    task_id = str(uuid4())
+    _validate_generation_params()
 
     if uploaded_files:
         local_videos_dir = utils.storage_dir("local_videos", create=True)
@@ -1063,5 +1131,582 @@ if start_button:
     open_task_folder(task_id)
     logger.info(tr("Video Generation Completed"))
     scroll_to_bottom()
+
+
+# ── 故事版流程：先產生腳本/配音/字幕/素材，逐段檢視後再合成 ─────────────────
+def _split_script_chunks(script_text: str, n: int):
+    """Split the script into n roughly-even chunks. Falls back from sentence
+    enders to commas, then to plain character slicing, so scripts written as
+    one long sentence still spread across all segments."""
+    if n <= 0:
+        return []
+    text = (script_text or "").strip()
+    if not text:
+        return [""] * n
+    parts = [s for s in re.split(r"(?<=[。！？.!?])\s*", text) if s.strip()]
+    if len(parts) < n:
+        finer = []
+        for p in (parts or [text]):
+            finer.extend(x for x in re.split(r"(?<=[，,、；;：:])\s*", p) if x.strip())
+        if len(finer) >= len(parts):
+            parts = finer
+    if len(parts) < n:
+        size = max(1, len(text) // n)
+        parts = [text[i * size:(i + 1) * size] for i in range(n - 1)]
+        parts.append(text[(n - 1) * size:])
+        parts = [p for p in parts if p]
+    # distribute parts into n buckets balanced by cumulative length
+    chunks = [""] * n
+    total = sum(len(p) for p in parts)
+    acc = 0
+    for p in parts:
+        idx = min(n - 1, int(acc * n / max(1, total)))
+        chunks[idx] += p
+        acc += len(p)
+    return chunks
+
+
+def _storyboard_file(task_id: str) -> str:
+    return os.path.join(utils.task_dir(task_id), "storyboard.json")
+
+
+def _load_storyboard_data(task_id: str):
+    """Load storyboard.json → (style, segments); tolerates the legacy list shape."""
+    try:
+        with open(_storyboard_file(task_id), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return "", []
+    if isinstance(data, list):
+        data = {"style": "", "segments": data}
+    segments = data.get("segments", [])
+    for s in segments:
+        if not s.get("uid"):
+            s["uid"] = uuid4().hex[:8]
+    return data.get("style", ""), segments
+
+
+def _load_characters(task_id: str) -> list:
+    try:
+        with open(_storyboard_file(task_id), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("characters", []) if isinstance(data, dict) else []
+    except Exception:
+        return []
+
+
+def _save_storyboard_data(task_id: str, style: str, segments: list, characters=None):
+    # characters=None → keep whatever is already on disk
+    if characters is None:
+        characters = _load_characters(task_id)
+    with open(_storyboard_file(task_id), "w", encoding="utf-8") as f:
+        json.dump({"style": style, "characters": characters, "segments": segments},
+                  f, ensure_ascii=False, indent=2)
+
+
+def _build_storyboard(task_id: str, materials: list, segment_count: int = 0, drama: dict = None) -> list:
+    """Build (and persist) the editable storyboard for a task: per-segment
+    script chunk, image prompt, LLM-generated transition note and must-say line."""
+    sb_dir = utils.task_dir(task_id)
+    script_text, terms = "", []
+    try:
+        with open(os.path.join(sb_dir, "script.json"), "r", encoding="utf-8") as f:
+            _sd = json.loads(f.read())
+            script_text = _sd.get("script", "")
+            terms = _sd.get("search_terms", []) or []
+    except Exception:
+        pass
+    n = len(materials) or int(segment_count)
+    if n <= 0 and script_text:
+        # 重開舊任務時不知道原段數 → 依腳本長度估算（與後端相同邏輯）
+        ascii_ratio = sum(1 for c in script_text if ord(c) < 128) / max(1, len(script_text))
+        est = max(10.0, len(script_text.split()) / 2.5) if ascii_ratio > 0.7 \
+            else max(10.0, len(script_text) / 4.0)
+        n = max(1, min(8, math.ceil(est / max(1, params.video_clip_duration))))
+    n = max(1, n)
+    characters = []
+    if drama and drama.get("segments"):
+        # Character-performance storyboard
+        d_segs = drama.get("segments", [])
+        n = len(d_segs)
+        characters = drama.get("characters", [])
+        film_style = drama.get("style", "")
+        segments = []
+        for i in range(n):
+            d = d_segs[i]
+            clip = materials[i] if i < len(materials) else ""
+            image = ""
+            if str(clip).endswith(".png"):
+                image = str(clip)
+                clip = ""
+            segments.append({
+                "uid": uuid4().hex[:8],
+                "clip": clip, "image": image,
+                "prompt": d.get("video_direction", ""),
+                "scene": d.get("scene", ""),
+                "dialogue_text": d.get("dialogue_text", ""),
+                "script_chunk": "",
+                "transition_note": d.get("transition_note", ""),
+                "must_say": d.get("must_say", ""),
+                "video_prompt": d.get("video_direction", ""),
+                "transition_effect": d.get("transition_effect", "none"),
+            })
+        _save_storyboard_data(task_id, film_style, segments, characters=characters)
+        return segments
+
+    chunks = _split_script_chunks(script_text, n)
+    _nb = llm.generate_storyboard_notes(script_text, chunks)
+    notes, film_style = _nb["notes"], _nb["style"]
+    segments = []
+    for i in range(n):
+        clip = materials[i] if i < len(materials) else ""
+        image = ""
+        if str(clip).endswith(".png.mp4"):
+            image = str(clip)[:-4]
+        elif str(clip).endswith(".png"):
+            image = str(clip)
+            clip = ""  # static image only; clip is rendered at segment phase
+        term = terms[i % len(terms)] if terms else ""
+        segments.append({
+            "uid": uuid4().hex[:8],
+            "clip": clip,
+            "image": image,
+            "prompt": term,
+            "script_chunk": chunks[i] if i < len(chunks) else "",
+            "transition_note": notes[i]["transition_note"] if i < len(notes) else "",
+            "must_say": notes[i]["must_say"] if i < len(notes) else "",
+            "video_prompt": notes[i].get("video_direction", "") if i < len(notes) else "",
+            "transition_effect": notes[i].get("transition_effect", "none") if i < len(notes) else "none",
+        })
+    _save_storyboard_data(task_id, film_style, segments, characters=[])
+    return segments
+
+
+if storyboard_button:
+    config.save_config()
+    _validate_generation_params()
+    task_id = str(uuid4())
+    st.toast(tr("Generating Storyboard"))
+    with st.spinner(tr("Generating Storyboard")):
+        result = tm.storyboard_start(task_id=task_id, params=params)
+    if not result or not (result.get("materials") or result.get("segment_count")):
+        st.error(tr("Video Generation Failed"))
+        st.stop()
+    with st.spinner(tr("Generating Storyboard Notes")):
+        _build_storyboard(task_id, result.get("materials", []),
+                          segment_count=result.get("segment_count", 0),
+                          drama=result.get("drama"))
+    st.session_state["storyboard"] = {"task_id": task_id, "stage": "board"}
+
+_sb = st.session_state.get("storyboard")
+if _sb:
+    st.divider()
+    st.subheader("📋 " + tr("Storyboard Review"))
+    _sb_tid = _sb["task_id"]
+    _sb_dir = utils.task_dir(_sb_tid)
+
+    # 舊任務（從歷史重開）尚無 storyboard.json → 現場建立
+    if not os.path.exists(_storyboard_file(_sb_tid)):
+        with st.spinner(tr("Generating Storyboard Notes")):
+            _build_storyboard(_sb_tid, _sb.get("materials", []))
+    _sb_style, _segments = _load_storyboard_data(_sb_tid)
+    _sb_chars = _load_characters(_sb_tid)
+    _is_drama = getattr(params, "presentation_mode", "narration") == "drama" or bool(_sb_chars)
+
+    _sb_stage = _sb.get("stage", "board")
+    if _sb_stage == "auto":
+        _all_rendered = bool(_segments) and all(
+            s.get("segment_video") and os.path.exists(s["segment_video"]) for s in _segments
+        )
+        _sb_stage = "segments" if _all_rendered else "board"
+        st.session_state["storyboard"]["stage"] = _sb_stage
+
+    # 舊版故事版缺全片風格或演繹腳本 → 一次補產
+    if _segments and (not _sb_style or all(not s.get("video_prompt") for s in _segments)):
+        with st.spinner(tr("Generating Storyboard Notes")):
+            _bk = llm.generate_storyboard_notes(
+                "".join(s.get("script_chunk", "") for s in _segments),
+                [s.get("script_chunk", "") for s in _segments],
+            )
+        _bk_notes = _bk["notes"]
+        if not _sb_style:
+            _sb_style = _bk["style"]
+        for _bi, s in enumerate(_segments):
+            if _bi < len(_bk_notes):
+                if not s.get("video_prompt"):
+                    s["video_prompt"] = _bk_notes[_bi].get("video_direction", "")
+                if not s.get("transition_note"):
+                    s["transition_note"] = _bk_notes[_bi].get("transition_note", "")
+                if not s.get("must_say"):
+                    s["must_say"] = _bk_notes[_bi].get("must_say", "")
+                if not s.get("transition_effect"):
+                    s["transition_effect"] = _bk_notes[_bi].get("transition_effect", "none")
+        _save_storyboard_data(_sb_tid, _sb_style, _segments)
+
+    def _seg_sig(s):
+        return hashlib.md5(
+            ((s.get("script_chunk") or "") + "|" + (s.get("dialogue_text") or "") + "|"
+             + (s.get("clip") or s.get("image") or "")
+             ).encode("utf-8")).hexdigest()[:12]
+
+    if _sb_stage == "board":
+        _sb_style = st.text_input(
+            "🎨 " + tr("Film Style"), value=_sb_style, key=f"sb_{_sb_tid}_style",
+            help=tr("Film Style Help"))
+        if _is_drama and _sb_chars:
+            with st.expander("🎭 " + tr("Cast") + f"（{len(_sb_chars)}）", expanded=True):
+                _cast_changed = False
+                for _ci, _ch in enumerate(_sb_chars):
+                    _cc = st.columns([2, 1, 4])
+                    _nn = _cc[0].text_input(tr("Character Name"), value=_ch.get("name", ""),
+                                            key=f"cast_{_sb_tid}_{_ci}_name")
+                    _gg = _cc[1].selectbox(tr("Gender"), ["female", "male"],
+                                           index=0 if _ch.get("gender") == "female" else 1,
+                                           format_func=lambda x: tr("Female") if x == "female" else tr("Male"),
+                                           key=f"cast_{_sb_tid}_{_ci}_gender")
+                    _dd = _cc[2].text_input(tr("Persona"), value=_ch.get("desc", ""),
+                                            key=f"cast_{_sb_tid}_{_ci}_desc")
+                    if _nn != _ch.get("name") or _gg != _ch.get("gender") or _dd != _ch.get("desc"):
+                        _ch["name"], _ch["gender"], _ch["desc"] = _nn, _gg, _dd
+                        _cast_changed = True
+                _vm_preview = voice.assign_character_voices(_sb_chars)
+                st.caption("🔈 " + tr("Voice assignment") + "：" +
+                           "　".join(f"{k}→{v.split('-')[-1].replace('Neural','')}" for k, v in _vm_preview.items()))
+                if _cast_changed:
+                    _save_storyboard_data(_sb_tid, _sb_style, _segments, characters=_sb_chars)
+        _total_chars = sum(len((s.get("dialogue_text") if _is_drama else s.get("script_chunk")) or "") for s in _segments)
+        _total_est = _total_chars / 4.0
+        _target = getattr(params, "video_total_duration", 0) or 0
+        _dur_msg = f"⏱ {tr('Estimated total')}：{_total_chars} {tr('chars')} ≈ {_total_est:.0f} {tr('seconds')}"
+        if _target:
+            _dur_msg += f"　|　{tr('Target')}：{_target} {tr('seconds')}"
+            if _total_est > _target * 1.2:
+                _dur_msg += f"　⚠️ {tr('Over target hint')}"
+        st.caption(_dur_msg)
+        for i, seg in enumerate(_segments):
+            _uid = seg.get("uid", str(i))
+            _hdr_l, _hdr_r = st.columns([5, 1])
+            _hdr_l.markdown(f"##### 🎬 {tr('Segment')} {i + 1}")
+            if _hdr_r.button("🗑 " + tr("Remove Segment"), key=f"rmseg_{_sb_tid}_{_uid}"):
+                _segments.pop(i)
+                _save_storyboard_data(_sb_tid, _sb_style, _segments)
+                st.rerun()
+            c_media, c_text = st.columns([1, 2])
+            with c_media:
+                _clip = seg.get("clip", "")
+                _is_veo = "llm-video-" in os.path.basename(str(_clip))
+                if _is_veo and os.path.exists(_clip):
+                    st.video(_clip)
+                elif seg.get("image") and os.path.exists(seg["image"]):
+                    st.image(seg["image"], use_container_width=True)
+                elif _clip and os.path.exists(_clip):
+                    st.video(_clip)
+                else:
+                    st.caption("🖼 " + tr("No storyboard image yet"))
+                _seg_img = seg.get("image", "")
+                _has_img = bool(_seg_img) and os.path.exists(_seg_img)
+                if not _has_img:
+                    st.caption("ℹ️ " + tr("Generate image first for image-to-video"))
+                if st.button("🎥 " + tr("Generate Segment Clip"), key=f"segvid_{_sb_tid}_{_uid}",
+                             use_container_width=True):
+                    _vp = st.session_state.get(f"sb_{_sb_tid}_{_uid}_vprompt", seg.get("video_prompt", ""))
+                    if not (_vp or "").strip():
+                        st.error(tr("Video direction required"))
+                    else:
+                        with st.spinner(tr("Generating Segment Clip Wait")):
+                            _vid = material.generate_single_video_llm(
+                                _sb_tid, _vp, params.video_aspect,
+                                max_clip_duration=params.video_clip_duration, index=_uid,
+                                style=_sb_style,
+                                reference_image=_seg_img if _has_img else "",
+                            )
+                        if _vid:
+                            seg["clip"] = _vid
+                            seg["video_prompt"] = _vp
+                            _save_storyboard_data(_sb_tid, _sb_style, _segments)
+                            st.rerun()
+                        else:
+                            st.error(tr("Video Generation Failed"))
+                # 單段產生/重新產生分鏡圖
+                _img_btn_label = ("🔄 " + tr("Regenerate Image")) if seg.get("image") \
+                    else ("🖼 " + tr("Generate Storyboard Image"))
+                if True:
+                    if st.button(_img_btn_label, key=f"regen_{_sb_tid}_{_uid}",
+                                 use_container_width=True):
+                        _new_prompt = st.session_state.get(f"sb_{_sb_tid}_{_uid}_prompt", seg.get("prompt", ""))
+                        if not (_new_prompt or "").strip():
+                            _new_prompt = seg.get("video_prompt", "") or seg.get("script_chunk", "")
+                        with st.spinner(tr("Regenerating Image")):
+                            _img = material.generate_single_image_llm(
+                                _sb_tid, _new_prompt, params.video_aspect, index=_uid,
+                                style=_sb_style,
+                            )
+                            if _img:
+                                seg["image"] = _img
+                                _old_clip = seg.get("clip", "")
+                                if _old_clip and os.path.exists(_old_clip):
+                                    try:
+                                        os.remove(_old_clip)  # stale zoom clip
+                                    except OSError:
+                                        pass
+                                seg["clip"] = ""  # re-rendered at segment phase
+                        if _img:
+                            seg["prompt"] = _new_prompt
+                            _save_storyboard_data(_sb_tid, _sb_style, _segments)
+                            st.rerun()
+                        else:
+                            st.error(tr("Video Generation Failed"))
+            with c_text:
+                seg["prompt"] = st.text_input(
+                    tr("Image Prompt"), value=seg.get("prompt", ""),
+                    key=f"sb_{_sb_tid}_{_uid}_prompt")
+                if _is_drama:
+                    if seg.get("scene"):
+                        st.caption("🎬 " + tr("Scene") + "：" + seg.get("scene", ""))
+                    seg["dialogue_text"] = st.text_area(
+                        tr("Dialogue"), value=seg.get("dialogue_text", ""),
+                        key=f"sb_{_sb_tid}_{_uid}_dialogue", height=120,
+                        help=tr("Dialogue Help"))
+                    seg["script_chunk"] = ""
+                else:
+                    seg["script_chunk"] = st.text_area(
+                        tr("Segment Script"), value=seg.get("script_chunk", ""),
+                        key=f"sb_{_sb_tid}_{_uid}_chunk", height=100)
+                _ck_len = len((seg["script_chunk"] or "").strip())
+                _ck_sec = _ck_len / 4.0
+                _rec_chars = params.video_clip_duration * 4
+                _ck_msg = (f"{_ck_len} {tr('chars')} ≈ {_ck_sec:.0f} {tr('seconds')}"
+                           f"　|　{tr('Clip length suggestion')}：≤ {_rec_chars} {tr('chars')}"
+                           f"（{params.video_clip_duration} {tr('seconds')}）")
+                if _ck_sec > params.video_clip_duration * 1.5:
+                    _ck_msg = "⚠️ " + _ck_msg + "　" + tr("Narration exceeds clip hint")
+                st.caption(_ck_msg)
+                seg["must_say"] = st.text_input(
+                    "🔑 " + tr("Must-say Key Line"), value=seg.get("must_say", ""),
+                    key=f"sb_{_sb_tid}_{_uid}_mustsay")
+                seg["transition_note"] = st.text_input(
+                    "🔗 " + tr("Transition Note"), value=seg.get("transition_note", ""),
+                    key=f"sb_{_sb_tid}_{_uid}_trans")
+                seg["video_prompt"] = st.text_area(
+                    "🎥 " + tr("Video Direction Script"), value=seg.get("video_prompt", ""),
+                    key=f"sb_{_sb_tid}_{_uid}_vprompt", height=80)
+                _fx_opts = ["none", "fade_in", "fade", "slide_in"]
+                _fx_labels = {"none": tr("Hard cut"), "fade_in": tr("Fade in segment"),
+                              "fade": tr("Dip to black"), "slide_in": tr("Slide in segment")}
+                _cur_fx = seg.get("transition_effect", "none")
+                seg["transition_effect"] = st.selectbox(
+                    "🎞 " + tr("Segment Transition"), _fx_opts,
+                    index=_fx_opts.index(_cur_fx) if _cur_fx in _fx_opts else 0,
+                    format_func=lambda x: _fx_labels.get(x, x),
+                    key=f"sb_{_sb_tid}_{_uid}_fx")
+
+        if st.button("➕ " + tr("Add Segment"), key=f"addseg_{_sb_tid}", use_container_width=True):
+            _segments.append({
+                "uid": uuid4().hex[:8], "clip": "", "image": "", "prompt": "",
+                "script_chunk": "", "transition_note": "", "must_say": "",
+                "video_prompt": "", "transition_effect": "none",
+            })
+            _save_storyboard_data(_sb_tid, _sb_style, _segments)
+            st.rerun()
+
+        # 每次互動後持久化編輯內容
+        _save_storyboard_data(_sb_tid, _sb_style, _segments)
+
+        st.info(tr("Storyboard Hint"))
+
+        c_ok, c_discard = st.columns(2)
+        if c_ok.button("🎬 " + tr("Render Segments"), use_container_width=True, type="primary"):
+            _appended = []
+            for i, seg in enumerate(_segments):
+                _chunk = (seg.get("script_chunk") or "").strip()
+                _ms = (seg.get("must_say") or "").strip()
+                if _ms and _ms not in _chunk:
+                    seg["script_chunk"] = (_ms + "。" + _chunk) if _chunk else _ms
+                    _appended.append(i + 1)
+            if _appended:
+                st.warning(tr("Must-say merged hint") + "：" + ", ".join(map(str, _appended)))
+            _seg_inputs, _reused = [], 0
+            for i, s in enumerate(_segments):
+                _sv = s.get("segment_video", "")
+                if _sv and os.path.exists(_sv) and s.get("rendered_sig") == _seg_sig(s):
+                    _reused += 1
+                    continue  # 未修改且已渲染 → 直接沿用
+                _seg_inputs.append({"clip": s.get("clip"), "image": s.get("image"),
+                                    "script_chunk": s.get("script_chunk"),
+                                    "dialogue_text": s.get("dialogue_text", ""), "index": i})
+            if _reused:
+                st.toast(f"♻️ {_reused} / {len(_segments)} " + tr("segments reused"))
+            _outs_by_idx = {}
+            if _seg_inputs:
+                with st.spinner(tr("Rendering Segments")):
+                    _outs = tm.generate_segments(_sb_tid, params, _seg_inputs,
+                                                 voice_map=voice.assign_character_voices(_sb_chars))
+                _outs_by_idx = {inp["index"]: _outs[j] if j < len(_outs) else ""
+                                for j, inp in enumerate(_seg_inputs)}
+            for i, seg in enumerate(_segments):
+                if i in _outs_by_idx:
+                    seg["segment_video"] = _outs_by_idx[i]
+                    if _outs_by_idx[i]:
+                        seg["rendered_sig"] = _seg_sig(seg)
+            _save_storyboard_data(_sb_tid, _sb_style, _segments)
+            _ok_count = sum(1 for s in _segments
+                            if s.get("segment_video") and os.path.exists(s["segment_video"]))
+            if not _ok_count:
+                st.error(tr("Video Generation Failed"))
+            else:
+                st.session_state["storyboard"]["stage"] = "segments"
+                st.rerun()
+        if c_discard.button("🗑 " + tr("Discard Storyboard"), use_container_width=True):
+            del st.session_state["storyboard"]
+            st.rerun()
+
+    elif _sb_stage == "segments":
+        st.caption(tr("Segments Review Hint"))
+        for i, seg in enumerate(_segments):
+            st.markdown(f"##### 🎞️ {tr('Segment')} {i + 1}")
+            c_v, c_i = st.columns([1, 2])
+            with c_v:
+                _sv = seg.get("segment_video", "")
+                if _sv and os.path.exists(_sv):
+                    st.video(_sv)
+                else:
+                    st.warning(tr("Video Generation Failed"))
+            with c_i:
+                if seg.get("must_say"):
+                    st.markdown("🔑 **" + tr("Must-say Key Line") + "**：" + seg["must_say"])
+                if seg.get("transition_note"):
+                    st.markdown("🔗 **" + tr("Transition Note") + "**：" + seg["transition_note"]
+                                + f"　`{seg.get('transition_effect', 'none')}`")
+                st.caption(seg.get("dialogue_text") or seg.get("script_chunk", ""))
+                if st.button("🔁 " + tr("Re-render Segment"), key=f"reseg_{_sb_tid}_{seg.get('uid', i)}",
+                             use_container_width=True):
+                    with st.spinner(tr("Rendering Segments")):
+                        _outs = tm.generate_segments(_sb_tid, params,
+                            voice_map=voice.assign_character_voices(_sb_chars), segments=[
+                            {"clip": seg.get("clip"), "image": seg.get("image"),
+                             "script_chunk": seg.get("script_chunk"),
+                             "dialogue_text": seg.get("dialogue_text", ""), "index": i}])
+                    if _outs and _outs[0]:
+                        seg["segment_video"] = _outs[0]
+                        seg["rendered_sig"] = _seg_sig(seg)
+                        _save_storyboard_data(_sb_tid, _sb_style, _segments)
+                        st.rerun()
+                    else:
+                        st.error(tr("Video Generation Failed"))
+
+        c_merge, c_back, c_drop = st.columns(3)
+        if c_merge.button("✅ " + tr("Confirm & Merge"), use_container_width=True, type="primary"):
+            _seg_files = [s.get("segment_video") for s in _segments]
+            _seg_fx = [s.get("transition_effect", "none") for s in _segments]
+            with st.spinner(tr("Merging Segments")):
+                _fin = tm.merge_segments(_sb_tid, params, _seg_files, transitions=_seg_fx)
+            if not _fin or not _fin.get("videos"):
+                st.error(tr("Video Generation Failed"))
+            else:
+                st.success(tr("Video Generation Completed"))
+                for v in _fin["videos"]:
+                    st.video(v)
+                del st.session_state["storyboard"]
+        if c_back.button("⬅ " + tr("Back to Storyboard"), use_container_width=True):
+            st.session_state["storyboard"]["stage"] = "board"
+            st.rerun()
+        if c_drop.button("🗑 " + tr("Discard Storyboard"), use_container_width=True):
+            del st.session_state["storyboard"]
+            st.rerun()
+
+
+# ── 產製歷史區 ─────────────────────────────────────────────────────────────────
+st.divider()
+with st.expander("📜 " + tr("Generation History"), expanded=False):
+    _tasks_root = utils.storage_dir("tasks")
+    _entries = []
+    if os.path.isdir(_tasks_root):
+        for _tid in os.listdir(_tasks_root):
+            _tdir = os.path.join(_tasks_root, _tid)
+            if os.path.isdir(_tdir):
+                _entries.append((os.path.getmtime(_tdir), _tid, _tdir))
+    _entries.sort(reverse=True)
+
+    if not _entries:
+        st.caption(tr("No history yet"))
+    for _mtime, _tid, _tdir in _entries[:12]:
+        import datetime as _dt
+
+        _subject, _script_excerpt, _h_script, _h_terms = "", "", "", []
+        try:
+            with open(os.path.join(_tdir, "script.json"), "r", encoding="utf-8") as f:
+                _hd = json.loads(f.read())
+                _subject = (_hd.get("params", {}) or {}).get("video_subject", "")
+                _h_script = _hd.get("script", "") or ""
+                _h_terms = _hd.get("search_terms", []) or []
+                _script_excerpt = _h_script[:80]
+        except Exception:
+            pass
+        _finals = sorted(
+            f for f in os.listdir(_tdir) if f.startswith("final-") and f.endswith(".mp4")
+        )
+        _mat_files = sorted(
+            f for f in os.listdir(_tdir)
+            if f.startswith(("llm-image-", "llm-video-")) and not f.endswith(".png.mp4")
+        )
+        _when = _dt.datetime.fromtimestamp(_mtime).strftime("%Y-%m-%d %H:%M")
+        _title = _subject or _script_excerpt or _tid[:8]
+        st.markdown(f"**🎞️ {_title}**　`{_when}`" + ("" if _finals else f"　*({tr('Incomplete')})*"))
+        if _script_excerpt:
+            st.caption(_script_excerpt + ("…" if len(_script_excerpt) >= 80 else ""))
+        if _finals:
+            _fcols = st.columns(min(len(_finals), 2) + 1)
+            for _i, _f in enumerate(_finals[:2]):
+                _fcols[_i].video(os.path.join(_tdir, _f))
+        if _mat_files:
+            _mcols = st.columns(min(len(_mat_files), 5))
+            for _i, _mf in enumerate(_mat_files[:5]):
+                _mp = os.path.join(_tdir, _mf)
+                with _mcols[_i]:
+                    if _mf.endswith(".png"):
+                        st.image(_mp, use_container_width=True)
+                    elif _mf.endswith(".mp4"):
+                        st.video(_mp)
+        _seg_vids = sorted(
+            (f for f in os.listdir(_tdir) if re.match(r"segment-\d+\.mp4$", f)),
+            key=lambda x: int(re.search(r"\d+", x).group()),
+        )
+        if _seg_vids:
+            st.caption("🎞️ " + tr("Segment Videos") + f"（{len(_seg_vids)}）")
+            _scols = st.columns(min(len(_seg_vids), 4))
+            for _i, _sf in enumerate(_seg_vids[:4]):
+                _scols[_i].video(os.path.join(_tdir, _sf))
+            if len(_seg_vids) > 4:
+                st.caption(tr("Open storyboard to view all segments"))
+        _hb_load, _hb_sb, _hb_del = st.columns(3)
+        if _hb_load.button("↩️ " + tr("Load & Continue"), key=f"load_task_{_tid}",
+                           use_container_width=True):
+            st.session_state["_pending_load"] = {
+                "subject": _subject, "script": _h_script, "terms": _h_terms,
+            }
+            st.rerun()
+
+        _h_clips = sorted(
+            os.path.join(_tdir, f) for f in os.listdir(_tdir)
+            if f.endswith(".png.mp4") or (f.startswith("llm-video-") and f.endswith(".mp4"))
+        )
+        if _h_clips:
+            if _hb_sb.button("📋 " + tr("Reopen Storyboard"), key=f"sb_task_{_tid}",
+                             use_container_width=True):
+                st.session_state["_pending_load"] = {
+                    "subject": _subject, "script": _h_script, "terms": _h_terms,
+                }
+                st.session_state["storyboard"] = {"task_id": _tid, "materials": _h_clips,
+                                                  "stage": "auto"}
+                st.rerun()
+
+        if _hb_del.button("🗑 " + tr("Delete Task"), key=f"del_task_{_tid}",
+                          use_container_width=True):
+            import shutil as _shutil
+
+            _shutil.rmtree(_tdir, ignore_errors=True)
+            st.session_state.pop("storyboard", None)
+            st.rerun()
+        st.divider()
 
 config.save_config()

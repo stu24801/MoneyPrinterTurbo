@@ -194,7 +194,10 @@ def combine_videos(
                     clip = CompositeVideoClip([background, clip_resized])
                     
             shuffle_side = random.choice(["left", "right", "top", "bottom"])
-            if video_transition_mode.value == VideoTransitionMode.none.value:
+            if (
+                video_transition_mode is None
+                or video_transition_mode.value == VideoTransitionMode.none.value
+            ):
                 clip = clip
             elif video_transition_mode.value == VideoTransitionMode.fade_in.value:
                 clip = video_effects.fadein_transition(clip, 1)
@@ -482,6 +485,57 @@ def generate_video(
     )
     video_clip.close()
     del video_clip
+
+
+def merge_segment_videos(segment_files: List[str], output_file: str, params,
+                         transitions: List[str] = None):
+    """Concatenate reviewed segment videos (voice + subtitles already burned in)
+    into the final video. transitions[i] defines how the film enters segment i
+    ("none" | "fade_in" | "fade" | "slide_in"), driven by each segment's
+    connecting instruction. Background music is mixed over the result."""
+    clips = [VideoFileClip(f) for f in segment_files]
+    transitions = transitions or []
+    for i in range(len(clips)):
+        fx = transitions[i] if i < len(transitions) else "none"
+        try:
+            if fx == "fade_in":
+                clips[i] = video_effects.fadein_transition(clips[i], 0.8)
+            elif fx == "fade" and i > 0:
+                # dip to black: previous clip fades out, this one fades in
+                clips[i - 1] = video_effects.fadeout_transition(clips[i - 1], 0.6)
+                clips[i] = video_effects.fadein_transition(clips[i], 0.6)
+            elif fx == "slide_in" and i > 0:
+                clips[i] = video_effects.slidein_transition(clips[i], 0.8, "left")
+        except Exception as e:
+            logger.warning(f"transition '{fx}' on segment {i + 1} failed: {e}")
+    merged = concatenate_videoclips(clips)
+    audio_clip = merged.audio
+    bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
+    if bgm_file and audio_clip is not None:
+        try:
+            bgm_clip = AudioFileClip(bgm_file).with_effects(
+                [
+                    afx.MultiplyVolume(params.bgm_volume),
+                    afx.AudioFadeOut(3),
+                    afx.AudioLoop(duration=merged.duration),
+                ]
+            )
+            audio_clip = CompositeAudioClip([audio_clip, bgm_clip])
+            merged = merged.with_audio(audio_clip)
+        except Exception as e:
+            logger.error(f"failed to add bgm: {str(e)}")
+    merged.write_videofile(
+        output_file,
+        audio_codec="aac",
+        temp_audiofile_path=os.path.dirname(output_file),
+        threads=params.n_threads or 2,
+        logger=None,
+        fps=30,
+    )
+    for c in clips:
+        close_clip(c)
+    logger.success(f"merged {len(segment_files)} segments -> {output_file}")
+    return output_file
 
 
 def preprocess_video(materials: List[MaterialInfo], clip_duration=4):

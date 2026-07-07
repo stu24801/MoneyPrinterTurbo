@@ -7,8 +7,37 @@ from xml.sax.saxutils import unescape
 
 import edge_tts
 import requests
-from edge_tts import SubMaker, submaker
-from edge_tts.submaker import mktimestamp
+try:
+    from edge_tts import SubMaker, submaker
+    from edge_tts.submaker import mktimestamp
+except ImportError:
+    # edge-tts >= 7.x removed the old SubMaker API (create_sub/subs/offset and
+    # mktimestamp). Provide a local compatible implementation; the rest of this
+    # module keeps using the old semantics: offset = list of (start, end) in
+    # 100-nanosecond units, subs = list of word texts.
+    def mktimestamp(time_unit: float) -> str:
+        hour = int(time_unit / 10_000_000 / 3600)
+        minute = int(time_unit / 10_000_000 / 60 % 60)
+        seconds = time_unit / 10_000_000 % 60
+        return f"{hour:02d}:{minute:02d}:{seconds:06.3f}"
+
+    class SubMaker:
+        def __init__(self):
+            self.offset = []
+            self.subs = []
+
+        def create_sub(self, timestamp, text):
+            _offset, _duration = timestamp
+            self.offset.append((_offset, _offset + _duration))
+            self.subs.append(text)
+
+    class _SubmakerShim:
+        pass
+
+    submaker = _SubmakerShim()
+    submaker.SubMaker = SubMaker
+    submaker.mktimestamp = mktimestamp
+    edge_tts.SubMaker = SubMaker
 from loguru import logger
 from moviepy.video.tools import subtitles
 from moviepy.audio.io.AudioFileClip import AudioFileClip
@@ -1091,6 +1120,61 @@ Gender: Female
     return voices
 
 
+# ── 角色展演：聲線指派與情感語調 ───────────────────────────────────────────────
+_TW_VOICES = {
+    "female": ["zh-TW-HsiaoChenNeural", "zh-TW-HsiaoYuNeural"],
+    "male": ["zh-TW-YunJheNeural"],
+}
+_EMOTION_RATE = {
+    "平靜": 0.0, "開心": 0.10, "激動": 0.18, "悲傷": -0.15,
+    "嚴肅": -0.05, "溫柔": -0.08, "疑惑": -0.05, "緊張": 0.15,
+    "豪爽": 0.08, "驚訝": 0.12, "生氣": 0.15, "無奈": -0.10,
+}
+
+
+def assign_character_voices(characters: list) -> dict:
+    """Map character name -> edge voice, cycling the pool per gender so each
+    character keeps a distinct, consistent voice."""
+    mapping = {}
+    counters = {"female": 0, "male": 0}
+    for c in characters or []:
+        name = (c.get("name") or "").strip()
+        if not name:
+            continue
+        gender = "male" if str(c.get("gender", "")).lower().startswith("m") else "female"
+        pool = _TW_VOICES.get(gender) or _TW_VOICES["female"]
+        mapping[name] = pool[counters[gender] % len(pool)]
+        counters[gender] += 1
+    return mapping
+
+
+def emotion_to_rate(emotion: str) -> float:
+    return _EMOTION_RATE.get((emotion or "").strip(), 0.0)
+
+
+def parse_dialogue_lines(dialogue_text: str) -> list:
+    """Parse a character-performance block into [{speaker, emotion, line}].
+    Expected per-line format: 角色名（情感）：台詞."""
+    import re as _re
+    out = []
+    for raw in (dialogue_text or "").splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        m = _re.match(r"^(.+?)（(.+?)）\s*[：:]\s*(.+)$", s)
+        if m:
+            out.append({"speaker": m.group(1).strip(), "emotion": m.group(2).strip(),
+                        "line": m.group(3).strip()})
+        else:
+            m2 = _re.match(r"^(.+?)\s*[：:]\s*(.+)$", s)
+            if m2:
+                out.append({"speaker": m2.group(1).strip(), "emotion": "",
+                            "line": m2.group(2).strip()})
+            else:
+                out.append({"speaker": "", "emotion": "", "line": s})
+    return out
+
+
 def parse_voice_name(name: str):
     # zh-CN-XiaoyiNeural-Female
     # zh-CN-YunxiNeural-Male
@@ -1143,6 +1227,13 @@ def tts(
             logger.error(f"Invalid siliconflow voice name format: {voice_name}")
             return None
     elif is_gemini_voice(voice_name):
+        if not config.app.get("gemini_api_key", ""):
+            fallback_voice = "zh-TW-HsiaoChenNeural"
+            logger.warning(
+                f"gemini voice selected but gemini_api_key not set — "
+                f"falling back to edge voice: {fallback_voice}"
+            )
+            return azure_tts_v1(text, fallback_voice, voice_rate, voice_file)
         # 从voice_name中提取声音名称
         # 格式: gemini:voice-Gender
         parts = voice_name.split(":")
@@ -1178,7 +1269,14 @@ def azure_tts_v1(
             logger.info(f"start, voice name: {voice_name}, try: {i + 1}")
 
             async def _do() -> SubMaker:
-                communicate = edge_tts.Communicate(text, voice_name, rate=rate_str)
+                try:
+                    # edge-tts >= 7.x defaults to SentenceBoundary; we need word
+                    # level boundaries for subtitle timing.
+                    communicate = edge_tts.Communicate(
+                        text, voice_name, rate=rate_str, boundary="WordBoundary"
+                    )
+                except TypeError:  # edge-tts 6.x has no boundary parameter
+                    communicate = edge_tts.Communicate(text, voice_name, rate=rate_str)
                 sub_maker = edge_tts.SubMaker()
                 with open(voice_file, "wb") as file:
                     async for chunk in communicate.stream():

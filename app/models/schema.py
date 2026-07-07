@@ -75,6 +75,8 @@ class VideoParams(BaseModel):
     video_concat_mode: Optional[VideoConcatMode] = VideoConcatMode.random.value
     video_transition_mode: Optional[VideoTransitionMode] = None
     video_clip_duration: Optional[int] = 5
+    video_total_duration: Optional[int] = 0  # 預計影片總長度(秒)，0=自動
+    presentation_mode: Optional[str] = "narration"  # narration=旁白解說 | drama=角色展演
     video_count: Optional[int] = 1
 
     video_source: Optional[str] = "pexels"
