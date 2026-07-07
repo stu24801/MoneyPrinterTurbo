@@ -194,6 +194,9 @@
     "Upload reference images": "Upload reference images (applied to image & clip)",
     "Also include": "Also include",
     "Save & continue later": "Save & continue later",
-    "Progress saved": "Progress saved — reopen from Generation History to continue"
+    "Progress saved": "Progress saved — reopen from Generation History to continue",
+    "No reference yet": "No portrait yet",
+    "Prepare refs hint": "Optional: generate character portraits as a visual reference. Consistency is already kept via appearance text.",
+    "Prepare character references": "Generate character portraits (optional)"
   }
 }

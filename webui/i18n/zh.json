@@ -195,6 +195,9 @@
     "Upload reference images": "上传参考图片（可多张，套用到分镜图与素材视频）",
     "Also include": "并加入以下元素",
     "Save & continue later": "保存进度（稍后继续）",
-    "Progress saved": "进度已保存，可从「生成历史」重开故事板继续编辑"
+    "Progress saved": "进度已保存，可从「生成历史」重开故事板继续编辑",
+    "No reference yet": "尚未生成肖像",
+    "Prepare refs hint": "可选：可生成角色肖像作为视觉参考；角色外型一致性已由外型文字自动维持，不生成肖像也可以。",
+    "Prepare character references": "生成角色肖像（可选）"
   }
 }

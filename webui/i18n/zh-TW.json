@@ -195,6 +195,9 @@
     "Upload reference images": "上傳參考圖片（可多張，套用到分鏡圖與素材影片）",
     "Also include": "並加入以下元素",
     "Save & continue later": "儲存進度（稍後接續）",
-    "Progress saved": "進度已儲存，可從「產製歷史」重開故事版接續編輯"
+    "Progress saved": "進度已儲存，可從「產製歷史」重開故事版接續編輯",
+    "No reference yet": "尚未產生肖像",
+    "Prepare refs hint": "選用：可產生角色肖像作為視覺參考；角色外型一致性已由外型文字自動維持，不產肖像也可以。",
+    "Prepare character references": "產生角色肖像（選用）"
   }
 }

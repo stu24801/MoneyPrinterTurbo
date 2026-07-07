@@ -509,8 +509,7 @@ params = VideoParams(video_subject="")
 uploaded_files = []
 
 with left_panel:
-    with st.container(border=True):
-        st.write(tr("Video Script Settings"))
+    with st.expander("📝 " + tr("Video Script Settings"), expanded=False):
         params.video_subject = st.text_input(
             tr("Video Subject"),
             value=st.session_state["video_subject"],
@@ -1221,23 +1220,31 @@ def _save_storyboard_data(task_id: str, style: str, segments: list, characters=N
                    "stage": stage}, f, ensure_ascii=False, indent=2)
 
 
-def _ensure_character_refs(task_id, characters, style, aspect):
-    """Lazily give each character a fixed appearance + a reference portrait so
-    their look stays consistent across segment images. Mutates & persists
-    characters (adds 'appearance' and 'ref_image'). Returns True if changed."""
+def _ensure_character_appearances(task_id, characters, style):
+    """Fill in each character's fixed appearance text (one cheap LLM call).
+    This drives fast, consistent segment images. Mutates characters; returns
+    True if changed. Portraits are handled separately (expensive, opt-in)."""
     if not characters:
         return False
-    changed = False
-    # 1. fill in missing appearances in one LLM call
     missing = [c for c in characters if not (c.get("appearance") or "").strip()]
-    if missing:
-        appmap = llm.generate_character_appearances(
-            characters, style=style,
-            language=st.session_state.get("ui_language", ""))
-        for c in characters:
-            if not (c.get("appearance") or "").strip() and c.get("name") in appmap:
-                c["appearance"] = appmap[c["name"]]
-                changed = True
+    if not missing:
+        return False
+    appmap = llm.generate_character_appearances(
+        characters, style=style, language=st.session_state.get("ui_language", ""))
+    changed = False
+    for c in characters:
+        if not (c.get("appearance") or "").strip() and c.get("name") in appmap:
+            c["appearance"] = appmap[c["name"]]
+            changed = True
+    return changed
+
+
+def _ensure_character_refs(task_id, characters, style, aspect):
+    """Give each character a fixed appearance + a reference portrait (expensive,
+    opt-in). Mutates & persists characters. Returns True if changed."""
+    if not characters:
+        return False
+    changed = _ensure_character_appearances(task_id, characters, style)
     # 2. generate a reference portrait per character if missing
     for c in characters:
         rp = c.get("ref_image", "")
@@ -1377,6 +1384,9 @@ if _sb:
     _sb_style, _segments = _load_storyboard_data(_sb_tid)
     _sb_chars = _load_characters(_sb_tid)
     _is_drama = getattr(params, "presentation_mode", "narration") == "drama" or bool(_sb_chars)
+    # 自動補齊角色外型文字（便宜、一次 LLM 呼叫）→ 讓段落分鏡圖維持一致外型
+    if _is_drama and _sb_chars and _ensure_character_appearances(_sb_tid, _sb_chars, _sb_style):
+        _save_storyboard_data(_sb_tid, _sb_style, _segments, characters=_sb_chars)
 
     _sb_stage = _sb.get("stage", "board")
     if _sb_stage == "auto":
@@ -1444,6 +1454,27 @@ if _sb:
                            "　".join(f"{k}→{v.split('-')[-1].replace('Neural','')}" for k, v in _vm_preview.items()))
                 if _cast_changed:
                     _save_storyboard_data(_sb_tid, _sb_style, _segments, characters=_sb_chars)
+
+                # 角色參考圖：一次性準備（供分鏡圖維持一致外型），避免每次產圖重複生成
+                _refs_ready = all(c.get("ref_image") and os.path.exists(c["ref_image"]) for c in _sb_chars)
+                _rc = st.columns(len(_sb_chars) or 1)
+                for _ci, _ch in enumerate(_sb_chars):
+                    with _rc[_ci]:
+                        _rimg = _ch.get("ref_image", "")
+                        if _rimg and os.path.exists(_rimg):
+                            st.image(_rimg, caption=_ch.get("name", ""), use_container_width=True)
+                        else:
+                            st.caption("🎭 " + _ch.get("name", "") + "：" + tr("No reference yet"))
+                if not _refs_ready:
+                    st.caption("⚠️ " + tr("Prepare refs hint"))
+                if st.button(("🔄 " if _refs_ready else "🎭 ") + tr("Prepare character references"),
+                             key=f"prepref_{_sb_tid}", use_container_width=True):
+                    with st.spinner(tr("Preparing character references")):
+                        for _ch in _sb_chars:
+                            _ch["ref_image"] = ""  # force refresh
+                        _ensure_character_refs(_sb_tid, _sb_chars, _sb_style, params.video_aspect)
+                        _save_storyboard_data(_sb_tid, _sb_style, _segments, characters=_sb_chars)
+                    st.rerun()
         _total_chars = sum(len((s.get("dialogue_text") if _is_drama else s.get("script_chunk")) or "") for s in _segments)
         _total_est = _total_chars / 4.0
         _target = getattr(params, "video_total_duration", 0) or 0
@@ -1508,14 +1539,12 @@ if _sb:
                         _new_prompt = st.session_state.get(f"sb_{_sb_tid}_{_uid}_prompt", seg.get("prompt", ""))
                         if not (_new_prompt or "").strip():
                             _new_prompt = seg.get("video_prompt", "") or seg.get("script_chunk", "")
+                        # 角色一致性用「外型文字描述」維持（快速生成，可靠）；
+                        # 參考圖只用於使用者上傳的元素（明確 opt-in，才走較慢的 edits）。
                         _refs, _appear = [], ""
                         if _is_drama and _sb_chars:
-                            with st.spinner(tr("Preparing character references")):
-                                if _ensure_character_refs(_sb_tid, _sb_chars, _sb_style, params.video_aspect):
-                                    _save_storyboard_data(_sb_tid, _sb_style, _segments, characters=_sb_chars)
-                            _refs, _appear = _segment_character_refs(seg, _sb_chars)
-                        # 加入該段上傳的參考圖與說明
-                        _refs = _refs + [p for p in seg.get("ref_uploads", []) if os.path.exists(p)]
+                            _, _appear = _segment_character_refs(seg, _sb_chars)
+                        _refs = [p for p in seg.get("ref_uploads", []) if os.path.exists(p)]
                         _rdesc = (seg.get("ref_desc") or "").strip()
                         _img_prompt = _new_prompt + (f"。{tr('Also include')}：{_rdesc}" if _rdesc else "")
                         with st.spinner(tr("Regenerating Image")):
