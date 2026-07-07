@@ -1784,7 +1784,7 @@ if _sb:
         _auto_motion = st.checkbox(
             "🎬 " + tr("Auto motion for image-only segments") +
             (f"（{_img_only}）" if _img_only else ""),
-            value=st.session_state.get(f"automotion_{_sb_tid}", False),
+            value=st.session_state.get(f"automotion_{_sb_tid}", _is_drama),
             key=f"automotion_{_sb_tid}",
             help=tr("Auto motion help"))
 
