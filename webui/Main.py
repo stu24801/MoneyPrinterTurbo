@@ -1616,6 +1616,13 @@ if _sb:
                     st.video(_clip)
                 else:
                     st.caption("🖼 " + tr("No storyboard image yet"))
+                _mn = seg.get("motion_note", "")
+                if _mn == "text_fallback_policy":
+                    st.warning("⚠️ " + tr("Motion image rejected"))
+                elif _mn == "text_fallback":
+                    st.warning("⚠️ " + tr("Motion text fallback"))
+                elif _mn == "failed":
+                    st.error("❌ " + tr("Motion failed"))
                 _seg_img = seg.get("image", "")
                 _has_img = bool(_seg_img) and os.path.exists(_seg_img)
                 # ── Veo 影片按鈕 / 狀態 ──
@@ -1871,6 +1878,13 @@ if _sb:
                     st.markdown("🔗 **" + tr("Transition Note") + "**：" + seg["transition_note"]
                                 + f"　`{seg.get('transition_effect', 'none')}`")
                 st.caption(seg.get("dialogue_text") or seg.get("script_chunk", ""))
+                _mn = seg.get("motion_note", "")
+                if _mn == "text_fallback_policy":
+                    st.warning("⚠️ " + tr("Motion image rejected"))
+                elif _mn == "text_fallback":
+                    st.warning("⚠️ " + tr("Motion text fallback"))
+                elif _mn == "failed":
+                    st.error("❌ " + tr("Motion failed"))
                 if st.button("🔁 " + tr("Re-render Segment"), key=f"reseg_{_sb_tid}_{seg.get('uid', i)}",
                              use_container_width=True):
                     _vm = voice.assign_character_voices(_sb_chars, engine=config.ui.get("drama_voice_engine","edge"))
@@ -1879,8 +1893,8 @@ if _sb:
                              "dialogue_text": seg.get("dialogue_text", ""), "index": i}]
                     _vmo = st.session_state.get(f"vmode_{_sb_tid}", "tts")
                     jobs.submit(_sb_tid, "batch", "segments",
-                                (lambda si=_one, vm=_vm, vmo=_vmo: tm.job_render_segments(
-                                    _sb_tid, params, vm, si, voice_mode=vmo)), total=1)
+                                (lambda si=_one, vm=_vm, vmo=_vmo, am=_is_drama: tm.job_render_segments(
+                                    _sb_tid, params, vm, si, auto_motion=am, voice_mode=vmo)), total=1)
                     st.rerun()
 
         # 段落間演繹銜接方式

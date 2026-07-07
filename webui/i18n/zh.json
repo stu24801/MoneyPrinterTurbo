@@ -235,6 +235,9 @@
     "Voice mode": "配音方式",
     "TTS voiceover": "TTS 配音",
     "Subtitle only (use clip audio)": "只加字幕（用画面声音，不叠配音）",
-    "Voice mode help": "TTS 配音=用角色声线念台词。只加字幕=不加 TTS，直接用画面本身的声音（如 Veo 生成的角色语音），只显示字幕，避免与画面人声叠音。"
+    "Voice mode help": "TTS 配音=用角色声线念台词。只加字幕=不加 TTS，直接用画面本身的声音（如 Veo 生成的角色语音），只显示字幕，避免与画面人声叠音。",
+    "Motion image rejected": "此段分镜图被 AI 内容审查拒绝，已改用文字生成动态影片（画面可能与分镜图略有出入，可重新生成分镜图再试）",
+    "Motion text fallback": "图生影片失败，已改用文字生成动态影片（画面可能与分镜图略有出入）",
+    "Motion failed": "动态影片生成失败，此段暂用静态图，请稍后重试"
   }
 }

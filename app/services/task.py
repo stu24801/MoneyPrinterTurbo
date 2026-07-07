@@ -97,9 +97,10 @@ def job_generate_image(task_id, uid, prompt, aspect_value, style, appearance, re
 def job_generate_clip(task_id, uid, prompt, aspect_value, max_dur, style, reference_image):
     """Generate one segment's Veo clip (image-to-video if reference_image) by uid."""
     aspect = VideoAspect(aspect_value)
+    _note = {}
     vid = material.generate_single_video_llm(
         task_id, prompt, aspect, max_clip_duration=max_dur, index=uid,
-        style=style, reference_image=reference_image or "")
+        style=style, reference_image=reference_image or "", note_out=_note)
     if not vid:
         raise RuntimeError("video generation returned empty")
     data = _load_sb(task_id)
@@ -107,6 +108,7 @@ def job_generate_clip(task_id, uid, prompt, aspect_value, max_dur, style, refere
         if s.get("uid") == uid:
             s["clip"] = vid
             s["video_prompt"] = prompt
+            s["motion_note"] = _note.get("motion", "")
             break
     _save_sb(task_id, data)
     return {"clip": vid, "uid": uid}
@@ -170,14 +172,16 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
                 else:
                     vdir = s.get("video_prompt") or s.get("script_chunk") or ""
                 _seg_dur = int(s.get("duration") or params.video_clip_duration or 6)
+                _note = {}
                 vid = material.generate_single_video_llm(
                     task_id, vdir, VideoAspect(_aspect_value(params)),
                     max_clip_duration=_seg_dur, index=s.get("uid", idx),
-                    style=style, reference_image=image)
+                    style=style, reference_image=image, note_out=_note)
                 if vid:
                     data = _load_sb(task_id)
                     segs = data.get("segments", [])
                     segs[idx]["clip"] = vid
+                    segs[idx]["motion_note"] = _note.get("motion", "")
                     inp["clip"] = vid
                     _save_sb(task_id, data)
         outs = generate_segments(task_id, params, [inp], voice_map=voice_map, voice_mode=voice_mode)

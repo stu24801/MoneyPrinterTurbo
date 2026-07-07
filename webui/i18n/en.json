@@ -234,6 +234,9 @@
     "Voice mode": "Voice mode",
     "TTS voiceover": "TTS voiceover",
     "Subtitle only (use clip audio)": "Subtitle only (use clip's own audio)",
-    "Voice mode help": "TTS = character voiceover reads the lines. Subtitle only = no TTS; use the clip's own audio (e.g. Veo-generated speech) with subtitles only, avoiding double voices."
+    "Voice mode help": "TTS = character voiceover reads the lines. Subtitle only = no TTS; use the clip's own audio (e.g. Veo-generated speech) with subtitles only, avoiding double voices.",
+    "Motion image rejected": "This segment's storyboard image was rejected by AI content review; text-to-video was used instead (visuals may differ from the image; regenerate the image and retry).",
+    "Motion text fallback": "Image-to-video failed; text-to-video was used instead (visuals may differ from the image).",
+    "Motion failed": "Motion video generation failed; using the static image for now, please retry later."
   }
 }

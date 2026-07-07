@@ -440,6 +440,7 @@ def generate_single_video_llm(
     index: int = 0,
     style: str = "",
     reference_image: str = "",
+    note_out: dict = None,
 ) -> str:
     """Generate ONE storyboard segment video with Veo. When reference_image (a
     path to that segment's storyboard image) is given, image-to-video is used:
@@ -521,7 +522,10 @@ def generate_single_video_llm(
 
     vid, err = _post_veo(payload)
     if vid:
+        if note_out is not None:
+            note_out["motion"] = ""
         return vid
+    _rejected = (err == "content_policy")
     # image-to-video 因參考圖被 Veo 內容審查拒絕（或其他失敗）→ 改用純文字生成，
     # 讓該段仍是動態演繹而非靜態圖 zoom。
     if payload.get("image_b64"):
@@ -530,7 +534,11 @@ def generate_single_video_llm(
         payload.pop("image_mime", None)
         vid, err = _post_veo(payload)
         if vid:
+            if note_out is not None:
+                note_out["motion"] = "text_fallback_policy" if _rejected else "text_fallback"
             return vid
+    if note_out is not None:
+        note_out["motion"] = "failed"
     logger.error(f"failed to generate segment video after retries: {err}")
     return ""
 
