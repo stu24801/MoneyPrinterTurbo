@@ -226,6 +226,8 @@
     "Entrance transitions": "Entrance transitions",
     "Crossfade dissolve": "Crossfade dissolve",
     "Hard cut (continuous)": "Hard cut (continuous)",
-    "Segment bridging help": "Entrance transitions = fade/dip per segment; Crossfade = smooth dissolve between segments; Hard cut = continuous."
+    "Segment bridging help": "Entrance transitions = fade/dip per segment; Crossfade = smooth dissolve between segments; Hard cut = continuous.",
+    "Generate bridge scenes": "Generate bridge scenes (from connecting notes)",
+    "Generate bridge hint": "Generates a transitional clip (Veo + narration) from each segment's connecting note and inserts it between segments — the film gets longer but the story flows more completely (each bridge ~1-3 min, in background)."
   }
 }

@@ -1875,16 +1875,21 @@ if _sb:
                     st.rerun()
 
         # 段落間演繹銜接方式
-        _bridge_opts = ["transitions", "crossfade", "none"]
+        _bridge_opts = ["transitions", "crossfade", "generate", "none"]
         _bridge = st.radio(
             "🎬 " + tr("Segment bridging"), _bridge_opts, horizontal=True,
-            index=_bridge_opts.index(st.session_state.get(f"bridge_{_sb_tid}", "transitions")),
+            index=_bridge_opts.index(st.session_state.get(f"bridge_{_sb_tid}", "transitions"))
+            if st.session_state.get(f"bridge_{_sb_tid}", "transitions") in _bridge_opts else 0,
             format_func=lambda x: {"transitions": tr("Entrance transitions"),
                                    "crossfade": tr("Crossfade dissolve"),
+                                   "generate": tr("Generate bridge scenes"),
                                    "none": tr("Hard cut (continuous)")}.get(x, x),
             key=f"bridge_{_sb_tid}", help=tr("Segment bridging help"))
-        _use_fx = _bridge == "transitions"
+        _use_fx = _bridge in ("transitions", "generate")
         _cf = 0.6 if _bridge == "crossfade" else 0.0
+        _with_bridges = _bridge == "generate"
+        if _with_bridges:
+            st.caption("ℹ️ " + tr("Generate bridge hint"))
         c_merge, c_back, c_save2, c_drop = st.columns(4)
         if c_save2.button("💾 " + tr("Save & continue later"), use_container_width=True):
             _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="segments")
@@ -1894,7 +1899,8 @@ if _sb:
         if c_merge.button("✅ " + tr("Confirm & Merge"), use_container_width=True, type="primary"):
             params.crossfade = _cf
             jobs.submit(_sb_tid, "merge", "merge",
-                        (lambda uf=_use_fx, cf=_cf: tm.job_merge(_sb_tid, params, use_transitions=uf)),
+                        (lambda uf=_use_fx, wb=_with_bridges:
+                            tm.job_merge(_sb_tid, params, use_transitions=uf, with_bridges=wb)),
                         total=1)
             st.rerun()
         if c_back.button("⬅ " + tr("Back to Storyboard"), use_container_width=True):
