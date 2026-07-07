@@ -113,7 +113,7 @@ def job_generate_clip(task_id, uid, prompt, aspect_value, max_dur, style, refere
 
 
 def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
-                        auto_motion=False):
+                        auto_motion=False, voice_mode="tts"):
     """Render the given segment inputs, updating segment_video by index and
     setting stage=segments. When auto_motion is True, any segment that only has
     a static image (no Veo clip) first gets a Veo image-to-video clip generated
@@ -180,7 +180,7 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
                     segs[idx]["clip"] = vid
                     inp["clip"] = vid
                     _save_sb(task_id, data)
-        outs = generate_segments(task_id, params, [inp], voice_map=voice_map)
+        outs = generate_segments(task_id, params, [inp], voice_map=voice_map, voice_mode=voice_mode)
         out = outs[0] if outs else ""
         data = _load_sb(task_id)
         segs = data.get("segments", [])
@@ -196,18 +196,37 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
     return {"rendered": rendered, "total": total}
 
 
-def _generate_bridge(task_id, params, seg, idx, style, bridge_voice, narration=False):
+def _generate_bridge(task_id, params, seg, idx, style, bridge_voice, narration=False,
+                     characters=None, next_seg=None):
     """Generate a short bridging (串場) clip from a segment's connecting note
-    (串接說明 / transition_note): a transitional Veo scene. When narration=True a
-    brief voiceover + subtitle of the note is added; otherwise the bridge is just
-    the transitional scene with its own ambient sound. Returns the path or ""."""
+    (串接說明 / transition_note): a transitional Veo scene that stays consistent
+    with the adjacent segments' characters/scene. When narration=True a brief
+    voiceover + subtitle of the note is added; otherwise the bridge is just the
+    transitional scene with its own ambient sound. Returns the path or ""."""
     note = (seg.get("transition_note") or "").strip()
     if not note:
         return ""
     task_dir = utils.task_dir(task_id)
     uid = seg.get("uid", idx)
-    # transitional Veo scene from the note (cinematic connecting shot)
-    bridge_prompt = (f"電影感的轉場過渡畫面，銜接劇情：{note}。柔和運鏡，無文字")
+    # 保持與上下段落一致：帶入場景銜接 + 角色外型 + 全片風格
+    from_scene = (seg.get("scene") or seg.get("video_prompt") or "").strip()
+    to_scene = ((next_seg or {}).get("scene") or (next_seg or {}).get("video_prompt") or "").strip()
+    scene_ctx = ""
+    if from_scene or to_scene:
+        scene_ctx = f"從「{from_scene}」自然過渡到「{to_scene}」的鏡頭。"
+    appear = ""
+    if characters:
+        _spk = set()
+        for txt in (seg.get("dialogue_text", ""), (next_seg or {}).get("dialogue_text", "")):
+            for ln in voice.parse_dialogue_lines(txt or ""):
+                if ln.get("speaker"):
+                    _spk.add(ln["speaker"])
+        present = [c for c in characters if c.get("name") in _spk] or characters
+        appear = "；".join(f"{c.get('name','')}：{c.get('appearance','')}"
+                           for c in present if c.get("appearance"))
+        if appear:
+            appear = f"畫面中人物外型須與前後段落一致：{appear}。"
+    bridge_prompt = (f"電影感的轉場過渡畫面，銜接劇情：{note}。{scene_ctx}{appear}柔和運鏡，無文字")
     vclip = material.generate_single_video_llm(
         task_id, bridge_prompt, VideoAspect(_aspect_value(params)),
         max_clip_duration=4, index=f"bridge-{uid}", style=style, reference_image="")
@@ -277,7 +296,9 @@ def job_merge(task_id, params: VideoParams, use_transitions=True, with_bridges=F
             if not (bclip and os.path.exists(bclip)) or _stale:
                 jobs.update_progress(task_id, "merge", i, len(segs), f"bridge {i + 1}")
                 bclip = _generate_bridge(task_id, params, s, i, style, bridge_voice,
-                                         narration=bridge_narration)
+                                         narration=bridge_narration,
+                                         characters=data.get("characters", []),
+                                         next_seg=segs[i + 1] if i + 1 < len(segs) else None)
                 if bclip:
                     s["bridge_clip"] = bclip
                     s["bridge_narration"] = bool(bridge_narration)
@@ -798,10 +819,29 @@ def synthesize_drama_segment(task_dir, idx, dialogue_text, voice_map, subtitle_e
     return audio_f, srt_f
 
 
-def generate_segments(task_id, params: VideoParams, segments: list, voice_map: dict = None):
-    """Render one reviewable video per storyboard segment. In narration mode a
-    segment is voiced from script_chunk; in drama mode from dialogue_text, using
-    per-character voices and emotion. Returns segment paths ("" on failure)."""
+def _subtitle_from_dialogue(dialogue_text, duration, srt_path):
+    """Build an SRT that spreads the dialogue lines evenly across `duration`
+    (used when there is no TTS to time against — subtitle-only mode)."""
+    lines = voice.parse_dialogue_lines(dialogue_text)
+    lines = [ln for ln in lines if ln.get("line")]
+    if not lines:
+        return ""
+    per = duration / len(lines)
+    with open(srt_path, "w", encoding="utf-8") as f:
+        for n, ln in enumerate(lines):
+            st, et = n * per, (n + 1) * per
+            txt = (f"{ln['speaker']}：" if ln.get("speaker") else "") + ln["line"]
+            f.write(f"{n + 1}\n{_srt_ts(st)} --> {_srt_ts(et)}\n{txt}\n\n")
+    return srt_path if os.path.exists(srt_path) else ""
+
+
+def generate_segments(task_id, params: VideoParams, segments: list, voice_map: dict = None,
+                      voice_mode: str = "tts"):
+    """Render one reviewable video per storyboard segment. voice_mode:
+    - 'tts': generate character voiceover (drama) / narration (narration mode).
+    - 'subtitle_only': NO TTS — keep the clip's own audio (e.g. Veo-generated
+      character speech) and only add a subtitle, avoiding double/overlapping
+      voices. Returns segment paths ("" on failure)."""
     import copy
 
     task_dir = utils.task_dir(task_id)
@@ -810,6 +850,7 @@ def generate_segments(task_id, params: VideoParams, segments: list, voice_map: d
     if type(seg_params.video_concat_mode) is str:
         seg_params.video_concat_mode = VideoConcatMode(seg_params.video_concat_mode)
     drama = getattr(params, "presentation_mode", "narration") == "drama"
+    subtitle_only = voice_mode == "subtitle_only"
 
     outputs = []
     for i, seg in enumerate(segments):
@@ -833,9 +874,16 @@ def generate_segments(task_id, params: VideoParams, segments: list, voice_map: d
             logger.warning(f"segment {idx + 1}: missing script or clip, skipped")
             outputs.append("")
             continue
-        logger.info(f"\n\n## rendering segment {idx + 1} ({'drama' if drama else 'narration'})")
+        logger.info(f"\n\n## rendering segment {idx + 1} ({'drama' if drama else 'narration'}, "
+                    f"voice={voice_mode})")
         srt_f = ""
-        if drama:
+        if subtitle_only:
+            # 只加字幕、不加配音：用畫面本身聲音（如 Veo 生成的角色語音），避免疊音
+            audio_f = ""
+            if params.subtitle_enabled:
+                srt_f = path.join(task_dir, f"seg-{idx}.srt")
+                srt_f = _subtitle_from_dialogue(chunk, seg_dur, srt_f)
+        elif drama:
             audio_f, srt_f = synthesize_drama_segment(
                 task_dir, idx, chunk, voice_map or {}, params.subtitle_enabled)
             if audio_f is None:
@@ -871,6 +919,7 @@ def generate_segments(task_id, params: VideoParams, segments: list, voice_map: d
                 subtitle_path=srt_f,
                 output_file=seg_out,
                 params=seg_params,
+                min_duration=seg_dur,  # 段落至少達到設定秒數
             )
         except Exception as e:
             logger.error(f"segment {idx + 1}: compose failed: {e}")

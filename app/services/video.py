@@ -488,7 +488,7 @@ def generate_video(
 
 
 def compose_segment_video(clip_path, audio_path, subtitle_path, output_file, params,
-                          ambient_volume=0.12):
+                          ambient_volume=0.12, min_duration=0):
     """Compose ONE storyboard segment so it performs for the FULL narration:
     - the clip's motion plays once; if shorter than the voiceover it HOLDS the
       last frame (no 4-second looping); if longer it is trimmed to the voiceover.
@@ -513,6 +513,9 @@ def compose_segment_video(clip_path, audio_path, subtitle_path, output_file, par
     else:
         voice = None
         target = src.duration
+    # 讓段落至少達到設定的秒數（不足則定格延續）
+    if min_duration and target < min_duration:
+        target = float(min_duration)
 
     # resize/pad the visual to the target frame size
     vid = src.without_audio()
@@ -531,12 +534,15 @@ def compose_segment_video(clip_path, audio_path, subtitle_path, output_file, par
             vid = CompositeVideoClip([bg, nv])
 
     # match the visual length to the voiceover: trim if longer, freeze-hold if shorter
+    _freeze_extra = 0.0
     if vid.duration >= target:
         base_video = vid.subclipped(0, target)
     else:
-        hold = vid.to_ImageClip(t=max(0, vid.duration - 0.05)).with_duration(target - vid.duration)
-        hold = hold.with_fps(fps)
-        base_video = concatenate_videoclips([vid, hold])
+        # 需要定格延續：先把畫面本身寫成乾淨暫存檔（避免直接讀原檔末端越界），
+        # 再用 ffmpeg tpad 保持最後一幀延長到目標長度（快、穩定）。
+        _freeze_extra = target - vid.duration
+        base_video = vid.subclipped(0, vid.duration)  # 完整畫面，長度=片段本身
+        target = vid.duration  # 先合成到片段長度，延長在最後用 ffmpeg 做
     base_video = base_video.with_duration(target)
 
     # audio
@@ -585,12 +591,36 @@ def compose_segment_video(clip_path, audio_path, subtitle_path, output_file, par
             logger.error(f"subtitle overlay failed: {e}")
 
     base_video = base_video.with_duration(target)
-    base_video.write_videofile(output_file, audio_codec=audio_codec,
-                               temp_audiofile_path=output_dir,
-                               threads=params.n_threads or 2, logger=None, fps=fps)
-    close_clip(src)
-    close_clip(base_video)
-    logger.success(f"segment composed ({target:.1f}s, hold={vid.duration < target}): {output_file}")
+    # 需要延續到設定秒數 → 先寫暫存檔，再用 ffmpeg tpad 保持最後一幀延長
+    if _freeze_extra > 0.05:
+        tmp_out = output_file + ".base.mp4"
+        base_video.write_videofile(tmp_out, audio_codec=audio_codec,
+                                   temp_audiofile_path=output_dir,
+                                   threads=params.n_threads or 2, logger=None, fps=fps)
+        close_clip(src)
+        close_clip(base_video)
+        try:
+            import imageio_ffmpeg
+            _ff = imageio_ffmpeg.get_ffmpeg_exe()
+            import subprocess as _sp
+            _sp.run([_ff, "-y", "-i", tmp_out,
+                     "-vf", f"tpad=stop_mode=clone:stop_duration={_freeze_extra:.2f}",
+                     "-af", f"apad=pad_dur={_freeze_extra:.2f}",
+                     "-c:v", "libx264", "-c:a", "aac", output_file],
+                    capture_output=True, check=True)
+            os.remove(tmp_out)
+        except Exception as e:
+            logger.error(f"freeze-extend failed, using base: {e}")
+            if os.path.exists(tmp_out):
+                shutil.move(tmp_out, output_file)
+        logger.success(f"segment composed ({target + _freeze_extra:.1f}s, freeze-hold): {output_file}")
+    else:
+        base_video.write_videofile(output_file, audio_codec=audio_codec,
+                                   temp_audiofile_path=output_dir,
+                                   threads=params.n_threads or 2, logger=None, fps=fps)
+        close_clip(src)
+        close_clip(base_video)
+        logger.success(f"segment composed ({target:.1f}s): {output_file}")
     return output_file
 
 

@@ -230,6 +230,10 @@
     "Generate bridge scenes": "Generate bridge scenes (from connecting notes)",
     "Generate bridge hint": "Generates a transitional clip (Veo + narration) from each segment's connecting note and inserts it between segments — the film gets longer but the story flows more completely (each bridge ~1-3 min, in background).",
     "Bridge narration & subtitle": "Bridge narration & subtitle",
-    "Bridge narration help": "Off by default: bridges are just the transitional scene (with its own ambient sound). Turn on to narrate the connecting note with subtitles."
+    "Bridge narration help": "Off by default: bridges are just the transitional scene (with its own ambient sound). Turn on to narrate the connecting note with subtitles.",
+    "Voice mode": "Voice mode",
+    "TTS voiceover": "TTS voiceover",
+    "Subtitle only (use clip audio)": "Subtitle only (use clip's own audio)",
+    "Voice mode help": "TTS = character voiceover reads the lines. Subtitle only = no TTS; use the clip's own audio (e.g. Veo-generated speech) with subtitles only, avoiding double voices."
   }
 }

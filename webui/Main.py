@@ -1788,6 +1788,14 @@ if _sb:
             key=f"automotion_{_sb_tid}",
             help=tr("Auto motion help"))
 
+        # 配音方式：TTS 配音 或 只用畫面聲音+字幕（避免與 Veo 生成的角色語音疊音）
+        _vm_opts = ["tts", "subtitle_only"]
+        _voice_mode = st.radio(
+            "🎙 " + tr("Voice mode"), _vm_opts, horizontal=True,
+            index=_vm_opts.index(st.session_state.get(f"vmode_{_sb_tid}", "tts")),
+            format_func=lambda x: tr("TTS voiceover") if x == "tts" else tr("Subtitle only (use clip audio)"),
+            key=f"vmode_{_sb_tid}", help=tr("Voice mode help"))
+
         # 有個別分鏡圖/影片還在產製時，先擋住批次渲染（等它們完成再一起渲染）
         _seg_busy = any((k.startswith("img:") or k.startswith("clip:"))
                         and s.get("status") == "running" for k, s in _all_jobs.items())
@@ -1836,9 +1844,9 @@ if _sb:
                 _vm = voice.assign_character_voices(_sb_chars, engine=config.ui.get("drama_voice_engine","edge"))
                 _copied_params = params
                 jobs.submit(_sb_tid, "batch", "segments",
-                            (lambda si=_seg_inputs, vm=_vm, am=_auto_motion:
+                            (lambda si=_seg_inputs, vm=_vm, am=_auto_motion, vmo=_voice_mode:
                                 tm.job_render_segments(_sb_tid, _copied_params, vm, si,
-                                                       auto_motion=am)),
+                                                       auto_motion=am, voice_mode=vmo)),
                             total=len(_seg_inputs))
                 st.rerun()
         if c_discard.button("🗑 " + tr("Discard Storyboard"), use_container_width=True):
@@ -1869,9 +1877,10 @@ if _sb:
                     _one = [{"clip": seg.get("clip"), "image": seg.get("image"),
                              "script_chunk": seg.get("script_chunk"),
                              "dialogue_text": seg.get("dialogue_text", ""), "index": i}]
+                    _vmo = st.session_state.get(f"vmode_{_sb_tid}", "tts")
                     jobs.submit(_sb_tid, "batch", "segments",
-                                (lambda si=_one, vm=_vm: tm.job_render_segments(
-                                    _sb_tid, params, vm, si)), total=1)
+                                (lambda si=_one, vm=_vm, vmo=_vmo: tm.job_render_segments(
+                                    _sb_tid, params, vm, si, voice_mode=vmo)), total=1)
                     st.rerun()
 
         # 段落間演繹銜接方式
