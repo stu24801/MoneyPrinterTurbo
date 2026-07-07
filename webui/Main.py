@@ -31,6 +31,20 @@ from app.services import task as tm
 from app.services import jobs
 from app.utils import utils
 
+# torch × Streamlit 相容：Streamlit 的 source watcher 會遍歷每個已載入模組的
+# __path__._path 來決定依賴，而 torch.classes 的 __getattr__ 對這個存取拋
+# RuntimeError（"torch::class_" / "no running event loop"），造成頁面報錯、
+# rerun 中斷、故事版產製流程被打斷且 storyboard.json 進度未保存。
+# （fileWatcherType=none 無法擋，因為模組路徑提取在 watcher 類型之前執行。）
+# 給 torch.classes.__path__ 一個帶空 _path 的物件即可讓 watcher 安全略過，
+# 不影響 demucs 對 torch custom class 的正常使用。
+try:
+    import torch as _torch
+    import types as _types
+    _torch.classes.__path__ = _types.SimpleNamespace(_path=[])
+except Exception:
+    pass
+
 st.set_page_config(
     page_title="短片生成器",
     page_icon="🎬",
