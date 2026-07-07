@@ -487,6 +487,99 @@ def generate_video(
     del video_clip
 
 
+def compose_segment_video(clip_path, audio_path, subtitle_path, output_file, params,
+                          ambient_volume=0.12):
+    """Compose ONE storyboard segment so it performs for the FULL narration:
+    - the clip's motion plays once; if shorter than the voiceover it HOLDS the
+      last frame (no 4-second looping); if longer it is trimmed to the voiceover.
+    - audio = voiceover (main) + the clip's own sound mixed low as ambient
+      (keeps Veo's scene/environment sound instead of discarding it).
+    - subtitles are burned in. Segment length = voiceover length.
+    """
+    from moviepy import (VideoFileClip, AudioFileClip, CompositeAudioClip,
+                         CompositeVideoClip, concatenate_videoclips, afx)
+    aspect = VideoAspect(params.video_aspect)
+    video_width, video_height = aspect.to_resolution()
+    output_dir = os.path.dirname(output_file)
+
+    voice = AudioFileClip(audio_path).with_effects([afx.MultiplyVolume(params.voice_volume)])
+    target = voice.duration
+
+    src = VideoFileClip(clip_path)
+    native_audio = src.audio  # Veo ambient sound (may be None for image clips)
+
+    # resize/pad the visual to the target frame size
+    vid = src.without_audio()
+    if vid.size != [video_width, video_height] and tuple(vid.size) != (video_width, video_height):
+        cr = vid.w / vid.h
+        tr = video_width / video_height
+        if abs(cr - tr) < 0.01:
+            vid = vid.resized(new_size=(video_width, video_height))
+        else:
+            if cr > tr:
+                sf = video_width / vid.w
+            else:
+                sf = video_height / vid.h
+            nv = vid.resized(new_size=(int(vid.w * sf), int(vid.h * sf))).with_position("center")
+            bg = ColorClip(size=(video_width, video_height), color=(0, 0, 0)).with_duration(vid.duration)
+            vid = CompositeVideoClip([bg, nv])
+
+    # match the visual length to the voiceover: trim if longer, freeze-hold if shorter
+    if vid.duration >= target:
+        base_video = vid.subclipped(0, target)
+    else:
+        hold = vid.to_ImageClip(t=max(0, vid.duration - 0.05)).with_duration(target - vid.duration)
+        hold = hold.with_fps(fps)
+        base_video = concatenate_videoclips([vid, hold])
+    base_video = base_video.with_duration(target)
+
+    # audio: voiceover + low ambient from the clip's native sound
+    audio_layers = [voice]
+    if native_audio is not None:
+        try:
+            amb = native_audio.subclipped(0, min(native_audio.duration, target))
+            amb = amb.with_effects([afx.MultiplyVolume(ambient_volume)])
+            audio_layers.append(amb)
+        except Exception as e:
+            logger.warning(f"ambient audio skipped: {e}")
+    base_video = base_video.with_audio(CompositeAudioClip(audio_layers))
+
+    # subtitles
+    if params.subtitle_enabled and subtitle_path and os.path.exists(subtitle_path):
+        font_path = os.path.join(utils.font_dir(), params.font_name or "MicrosoftYaHeiBold.ttc")
+        try:
+            def _mk(text):
+                return TextClip(text=text, font=font_path, font_size=int(params.font_size))
+            sub = SubtitlesClip(subtitles=subtitle_path, encoding="utf-8", make_textclip=_mk)
+            tclips = []
+            for (ts, te), phrase in sub.subtitles:
+                mw = video_width * 0.9
+                wrapped, th = wrap_text(phrase, max_width=mw, font=font_path, fontsize=params.font_size)
+                tc = TextClip(text=wrapped, font=font_path, font_size=int(params.font_size),
+                              color=params.text_fore_color, bg_color=params.text_background_color,
+                              stroke_color=params.stroke_color, stroke_width=int(params.stroke_width))
+                tc = tc.with_start(ts).with_end(te).with_duration(te - ts)
+                if params.subtitle_position == "top":
+                    tc = tc.with_position(("center", video_height * 0.05))
+                elif params.subtitle_position == "center":
+                    tc = tc.with_position(("center", "center"))
+                else:
+                    tc = tc.with_position(("center", video_height * 0.95 - tc.h))
+                tclips.append(tc)
+            base_video = CompositeVideoClip([base_video, *tclips])
+        except Exception as e:
+            logger.error(f"subtitle overlay failed: {e}")
+
+    base_video = base_video.with_duration(target)
+    base_video.write_videofile(output_file, audio_codec=audio_codec,
+                               temp_audiofile_path=output_dir,
+                               threads=params.n_threads or 2, logger=None, fps=fps)
+    close_clip(src)
+    close_clip(base_video)
+    logger.success(f"segment composed ({target:.1f}s, hold={vid.duration < target}): {output_file}")
+    return output_file
+
+
 def merge_segment_videos(segment_files: List[str], output_file: str, params,
                          transitions: List[str] = None):
     """Concatenate reviewed segment videos (voice + subtitles already burned in)
@@ -499,13 +592,13 @@ def merge_segment_videos(segment_files: List[str], output_file: str, params,
         fx = transitions[i] if i < len(transitions) else "none"
         try:
             if fx == "fade_in":
-                clips[i] = video_effects.fadein_transition(clips[i], 0.8)
+                clips[i] = video_effects.fadein_transition(clips[i], 1.0)
             elif fx == "fade" and i > 0:
                 # dip to black: previous clip fades out, this one fades in
-                clips[i - 1] = video_effects.fadeout_transition(clips[i - 1], 0.6)
-                clips[i] = video_effects.fadein_transition(clips[i], 0.6)
+                clips[i - 1] = video_effects.fadeout_transition(clips[i - 1], 0.8)
+                clips[i] = video_effects.fadein_transition(clips[i], 0.8)
             elif fx == "slide_in" and i > 0:
-                clips[i] = video_effects.slidein_transition(clips[i], 0.8, "left")
+                clips[i] = video_effects.slidein_transition(clips[i], 1.0, "left")
         except Exception as e:
             logger.warning(f"transition '{fx}' on segment {i + 1} failed: {e}")
     merged = concatenate_videoclips(clips)
@@ -513,17 +606,23 @@ def merge_segment_videos(segment_files: List[str], output_file: str, params,
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
     if bgm_file and audio_clip is not None:
         try:
-            bgm_clip = AudioFileClip(bgm_file).with_effects(
-                [
-                    afx.MultiplyVolume(params.bgm_volume),
-                    afx.AudioFadeOut(3),
-                    afx.AudioLoop(duration=merged.duration),
-                ]
-            )
-            audio_clip = CompositeAudioClip([audio_clip, bgm_clip])
-            merged = merged.with_audio(audio_clip)
+            bgm_clip = AudioFileClip(bgm_file)
+            # loop bgm to cover the whole film (AudioLoop 在部分 moviepy 版本不可用 → fallback)
+            try:
+                bgm_clip = bgm_clip.with_effects([afx.AudioLoop(duration=merged.duration)])
+            except Exception:
+                import math as _m
+                from moviepy import concatenate_audioclips as _cat
+                n = max(1, _m.ceil(merged.duration / max(0.1, bgm_clip.duration)))
+                bgm_clip = _cat([bgm_clip] * n).subclipped(0, merged.duration)
+            bgm_clip = bgm_clip.with_effects([afx.MultiplyVolume(params.bgm_volume or 0.2),
+                                              afx.AudioFadeOut(3)])
+            merged = merged.with_audio(CompositeAudioClip([audio_clip, bgm_clip]))
+            logger.info(f"bgm added: {os.path.basename(bgm_file)} vol={params.bgm_volume}")
         except Exception as e:
             logger.error(f"failed to add bgm: {str(e)}")
+    else:
+        logger.warning(f"no bgm (bgm_file={bool(bgm_file)}, audio={audio_clip is not None})")
     merged.write_videofile(
         output_file,
         audio_codec="aac",

@@ -183,9 +183,16 @@ def job_merge(task_id, params: VideoParams, use_transitions=True):
     segs = data.get("segments", [])
     files = [s.get("segment_video") for s in segs]
     if use_transitions:
-        fx = [s.get("transition_effect", "none") for s in segs]
+        # 開啟轉場：每段依自己的設定；未設定(none)的段落給予柔和淡入，
+        # 讓每個段落交界都有可見的轉場、不再是硬切（第一段除外）。
+        fx = []
+        for i, s in enumerate(segs):
+            e = s.get("transition_effect", "none")
+            if e == "none" and i > 0:
+                e = "fade_in"
+            fx.append(e)
     else:
-        fx = ["none"] * len(segs)
+        fx = ["none"] * len(segs)  # 連續演繹、不被轉場打斷
     fin = merge_segments(task_id, params, files, transitions=fx)
     if not fin or not fin.get("videos"):
         raise RuntimeError("merge produced no video")
@@ -760,25 +767,18 @@ def generate_segments(task_id, params: VideoParams, segments: list, voice_map: d
                     logger.warning(f"segment {idx + 1}: subtitle failed: {e}")
                 if not path.exists(srt_f):
                     srt_f = ""
-        combined_f = path.join(task_dir, f"seg-{idx}-combined.mp4")
-        video.combine_videos(
-            combined_video_path=combined_f,
-            video_paths=[clip],
-            audio_file=audio_f,
-            video_aspect=params.video_aspect,
-            video_concat_mode=VideoConcatMode.sequential,
-            video_transition_mode=params.video_transition_mode,
-            max_clip_duration=seg_dur,
-            threads=params.n_threads,
-        )
+        # 專用段落合成：畫面定格配合配音長度（不輪播）、保留 Veo 環境音、字幕烧录
         seg_out = path.join(task_dir, f"segment-{idx + 1}.mp4")
-        video.generate_video(
-            video_path=combined_f,
-            audio_path=audio_f,
-            subtitle_path=srt_f,
-            output_file=seg_out,
-            params=seg_params,
-        )
+        try:
+            video.compose_segment_video(
+                clip_path=clip,
+                audio_path=audio_f,
+                subtitle_path=srt_f,
+                output_file=seg_out,
+                params=seg_params,
+            )
+        except Exception as e:
+            logger.error(f"segment {idx + 1}: compose failed: {e}")
         outputs.append(seg_out if path.exists(seg_out) else "")
     return outputs
 
