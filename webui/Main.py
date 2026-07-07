@@ -1575,8 +1575,9 @@ if _sb:
                         _vp_full = _vp + (f"。{tr('Also include')}：{_rdesc}" if _rdesc else "")
                         _av = params.video_aspect.value
                         _refimg = _seg_img if _has_img else ""
+                        _sd = int(seg.get("duration") or params.video_clip_duration or 6)
                         jobs.submit(_sb_tid, "clip", (lambda uid=_uid, p=_vp_full, av=_av,
-                                    md=params.video_clip_duration, ri=_refimg:
+                                    md=_sd, ri=_refimg:
                                     tm.job_generate_clip(_sb_tid, uid, p, av, md, _sb_style, ri)))
                         st.rerun()
                 # 單段產生/重新產生分鏡圖
@@ -1618,13 +1619,15 @@ if _sb:
                     seg["script_chunk"] = st.text_area(
                         tr("Segment Script"), value=seg.get("script_chunk", ""),
                         key=f"sb_{_sb_tid}_{_uid}_chunk", height=100)
-                _ck_len = len((seg["script_chunk"] or "").strip())
+                _seg_dur_cur = int(seg.get("duration") or params.video_clip_duration or 6)
+                _spoken = (seg.get("dialogue_text") if _is_drama else seg.get("script_chunk")) or ""
+                _ck_len = len(_spoken.strip())
                 _ck_sec = _ck_len / 4.0
-                _rec_chars = params.video_clip_duration * 4
+                _rec_chars = _seg_dur_cur * 4
                 _ck_msg = (f"{_ck_len} {tr('chars')} ≈ {_ck_sec:.0f} {tr('seconds')}"
                            f"　|　{tr('Clip length suggestion')}：≤ {_rec_chars} {tr('chars')}"
-                           f"（{params.video_clip_duration} {tr('seconds')}）")
-                if _ck_sec > params.video_clip_duration * 1.5:
+                           f"（{_seg_dur_cur} {tr('seconds')}）")
+                if _ck_sec > _seg_dur_cur * 1.5:
                     _ck_msg = "⚠️ " + _ck_msg + "　" + tr("Narration exceeds clip hint")
                 st.caption(_ck_msg)
                 seg["must_say"] = st.text_input(
@@ -1636,6 +1639,17 @@ if _sb:
                 seg["video_prompt"] = st.text_area(
                     "🎥 " + tr("Video Direction Script"), value=seg.get("video_prompt", ""),
                     key=f"sb_{_sb_tid}_{_uid}_vprompt", height=80)
+                # 每段演繹秒數（Veo 原生 4/6/8 秒；影響動態影片長度與合成裁切）
+                _dur_opts = [4, 6, 8]
+                _cur_dur = int(seg.get("duration") or params.video_clip_duration or 6)
+                if _cur_dur not in _dur_opts:
+                    _cur_dur = min(_dur_opts, key=lambda x: abs(x - _cur_dur))
+                seg["duration"] = st.selectbox(
+                    "⏱ " + tr("Segment duration"), _dur_opts,
+                    index=_dur_opts.index(_cur_dur),
+                    format_func=lambda x: f"{x} " + tr("seconds"),
+                    key=f"sb_{_sb_tid}_{_uid}_dur",
+                    help=tr("Segment duration help"))
                 _fx_opts = ["none", "fade_in", "fade", "slide_in"]
                 _fx_labels = {"none": tr("Hard cut"), "fade_in": tr("Fade in segment"),
                               "fade": tr("Dip to black"), "slide_in": tr("Slide in segment")}

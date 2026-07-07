@@ -209,6 +209,8 @@
     "Auto motion help": "When checked, segments that only have a static image get a Veo motion clip generated from that image + direction, for a dramatic result (Veo billed per second, ~1-3 min each, runs in background). Unchecked = static images shown with a slow zoom.",
     "Open project": "Open",
     "Back to projects": "Back to projects",
-    "Materials": "Materials"
+    "Materials": "Materials",
+    "Segment duration": "Segment duration",
+    "Segment duration help": "Length of this segment (Veo supports 4/6/8s). Keep the dialogue/script within this (~duration×4 CJK chars) to avoid the clip looping."
   }
 }

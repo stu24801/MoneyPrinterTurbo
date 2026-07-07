@@ -111,9 +111,10 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
             if (not clip or not os.path.exists(clip)) and image and os.path.exists(image):
                 jobs.update_progress(task_id, pos, total, f"segment {idx + 1} · motion")
                 vdir = s.get("video_prompt") or s.get("dialogue_text") or s.get("script_chunk") or ""
+                _seg_dur = int(s.get("duration") or params.video_clip_duration or 6)
                 vid = material.generate_single_video_llm(
                     task_id, vdir, VideoAspect(params.video_aspect.value),
-                    max_clip_duration=params.video_clip_duration, index=s.get("uid", idx),
+                    max_clip_duration=_seg_dur, index=s.get("uid", idx),
                     style=style, reference_image=image)
                 if vid:
                     data = _load_sb(task_id)
@@ -669,6 +670,8 @@ def generate_segments(task_id, params: VideoParams, segments: list, voice_map: d
     outputs = []
     for i, seg in enumerate(segments):
         idx = int(seg.get("index", i))
+        # 每段可設定演繹秒數（沒設就用全域設定）
+        seg_dur = int(seg.get("duration") or params.video_clip_duration or 6)
         if drama:
             chunk = (seg.get("dialogue_text") or "").strip()
         else:
@@ -679,7 +682,7 @@ def generate_segments(task_id, params: VideoParams, segments: list, voice_map: d
             m = MaterialInfo()
             m.provider = "llm"
             m.url = image
-            pp = video.preprocess_video([m], clip_duration=params.video_clip_duration)
+            pp = video.preprocess_video([m], clip_duration=seg_dur)
             if pp:
                 clip = pp[0].url
         if not chunk or not clip or not path.exists(clip):
@@ -723,7 +726,7 @@ def generate_segments(task_id, params: VideoParams, segments: list, voice_map: d
             video_aspect=params.video_aspect,
             video_concat_mode=VideoConcatMode.sequential,
             video_transition_mode=params.video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
+            max_clip_duration=seg_dur,
             threads=params.n_threads,
         )
         seg_out = path.join(task_dir, f"segment-{idx + 1}.mp4")
