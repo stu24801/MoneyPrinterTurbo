@@ -212,6 +212,9 @@
     "Back to projects": "返回專案列表",
     "Materials": "素材",
     "Segment duration": "本段演繹秒數",
-    "Segment duration help": "這一段影片的長度（Veo 動態影片原生支援 4/6/8 秒）。台詞/文案長度請控制在此秒數內（約 秒數×4 個中文字），避免影片循環重複。"
+    "Segment duration help": "這一段影片的長度（Veo 動態影片原生支援 4/6/8 秒）。台詞/文案長度請控制在此秒數內（約 秒數×4 個中文字），避免影片循環重複。",
+    "Auto image hint": "有 {n} 段尚未產生分鏡圖，產生分段影片時會自動補產（會多花一些時間）",
+    "segments generating in parallel": "段分鏡圖/影片並行產製中（可繼續點其他段一起產）",
+    "Wait for segment jobs before rendering": "有段落分鏡圖/影片還在產製，完成後再產生分段影片"
   }
 }

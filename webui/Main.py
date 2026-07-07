@@ -1371,6 +1371,12 @@ if storyboard_button:
                           drama=result.get("drama"))
     st.session_state["storyboard"] = {"task_id": task_id, "stage": "board"}
 
+def _aspect_val(params):
+    """params.video_aspect may be a VideoAspect enum or a raw string ('9:16')."""
+    a = params.video_aspect
+    return a.value if hasattr(a, "value") else a
+
+
 def _render_job_panel(task_id, job):
     """Show progress for a background job; user can leave & switch projects."""
     st.divider()
@@ -1397,35 +1403,36 @@ _sb = st.session_state.get("storyboard")
 if _sb:
     _sb_tid = _sb["task_id"]
     _sb_dir = utils.task_dir(_sb_tid)
-    _job = jobs.read_status(_sb_tid)
+    _all_jobs = jobs.read_all(_sb_tid)
 
-    # 背景任務進行中 → 只顯示進度面板，可切換其他專案（下方專案專區照常）
-    if _job and _job.get("status") == "running" and jobs.is_running(_sb_tid):
-        _render_job_panel(_sb_tid, _job)
+    # 批次任務（分段渲染 / 合併）→ 獨占進度面板、略過編輯；
+    # 個別分鏡圖/影片（img:/clip: key）可並行、不阻塞編輯，於段落內處理。
+    _batch_key = "batch" if _all_jobs.get("batch") else ("merge" if _all_jobs.get("merge") else None)
+    _batch = _all_jobs.get(_batch_key) if _batch_key else None
+    if _batch and _batch.get("status") == "running":
+        _render_job_panel(_sb_tid, _batch)
         _sb = None  # 略過下方編輯 UI，避免與背景執行緒搶存檔
-    elif _job and _job.get("status") in ("done", "error"):
+    elif _batch and _batch.get("status") in ("done", "error"):
         st.divider()
-        if _job["status"] == "error":
-            st.error("❌ " + tr("Production failed") + "：" + str(_job.get("error", "")))
-            jobs.clear(_sb_tid)
+        if _batch["status"] == "error":
+            st.error("❌ " + tr("Production failed") + "：" + str(_batch.get("error", "")))
+            jobs.clear(_sb_tid, _batch_key)
             if st.button(tr("Refresh progress"), key="job_err_ack"):
                 st.rerun()
             _sb = None
-        elif _job.get("kind") == "merge":
-            # 合併完成 → 顯示最終影片
+        elif _batch.get("kind") == "merge":
             st.subheader("🎬 " + tr("Video Generation Completed"))
-            for v in (_job.get("result", {}) or {}).get("videos", []):
+            for v in (_batch.get("result", {}) or {}).get("videos", []):
                 if os.path.exists(v):
                     st.video(v)
-            jobs.clear(_sb_tid)
+            jobs.clear(_sb_tid, _batch_key)
             if st.button("↩️ " + tr("Leave to other projects"), key="merge_done_leave",
                          use_container_width=True):
                 st.session_state.pop("storyboard", None)
                 st.rerun()
             _sb = None
-        else:
-            st.success("✅ " + tr("Production done"))
-            jobs.clear(_sb_tid)
+        else:  # 分段渲染完成
+            jobs.clear(_sb_tid, _batch_key)
             st.rerun()
 
 if _sb:
@@ -1487,6 +1494,16 @@ if _sb:
              ).encode("utf-8")).hexdigest()[:12]
 
     if _sb_stage == "board":
+        # 個別分鏡圖/影片並行產製中 → 顯示提示與更新鈕（不阻塞編輯）
+        _seg_running = [k for k, s in _all_jobs.items()
+                        if (k.startswith("img:") or k.startswith("clip:"))
+                        and s.get("status") == "running"]
+        if _seg_running:
+            _bc1, _bc2 = st.columns([3, 1])
+            _bc1.info(f"⏳ {len(_seg_running)} " + tr("segments generating in parallel"))
+            if _bc2.button("🔄 " + tr("Refresh progress"), key="seg_jobs_refresh",
+                           use_container_width=True):
+                st.rerun()
         _sb_style = st.text_input(
             "🎨 " + tr("Film Style"), value=_sb_style, key=f"sb_{_sb_tid}_style",
             help=tr("Film Style Help"))
@@ -1550,6 +1567,19 @@ if _sb:
                 _save_storyboard_data(_sb_tid, _sb_style, _segments)
                 st.rerun()
             c_media, c_text = st.columns([1, 2])
+            # 該段個別任務狀態（img:/clip: key，可跨段並行）
+            _img_key = f"img:{_uid}"
+            _clip_key = f"clip:{_uid}"
+            _img_job = _all_jobs.get(_img_key)
+            _clip_job = _all_jobs.get(_clip_key)
+            # 完成/失敗 → 清掉該段任務（結果已寫回 storyboard.json）
+            for _jk, _jd in ((_img_key, _img_job), (_clip_key, _clip_job)):
+                if _jd and _jd.get("status") in ("done", "error"):
+                    if _jd.get("status") == "error":
+                        st.warning(f"段 {i + 1}：" + str(_jd.get("error", ""))[:60])
+                    jobs.clear(_sb_tid, _jk)
+            _img_running = bool(_img_job and _img_job.get("status") == "running")
+            _clip_running = bool(_clip_job and _clip_job.get("status") == "running")
             with c_media:
                 _clip = seg.get("clip", "")
                 _is_veo = "llm-video-" in os.path.basename(str(_clip))
@@ -1563,33 +1593,38 @@ if _sb:
                     st.caption("🖼 " + tr("No storyboard image yet"))
                 _seg_img = seg.get("image", "")
                 _has_img = bool(_seg_img) and os.path.exists(_seg_img)
-                if not _has_img:
-                    st.caption("ℹ️ " + tr("Generate image first for image-to-video"))
-                if st.button("🎥 " + tr("Generate Segment Clip"), key=f"segvid_{_sb_tid}_{_uid}",
-                             use_container_width=True):
-                    _vp = st.session_state.get(f"sb_{_sb_tid}_{_uid}_vprompt", seg.get("video_prompt", ""))
-                    if not (_vp or "").strip():
-                        st.error(tr("Video direction required"))
-                    else:
-                        _rdesc = (seg.get("ref_desc") or "").strip()
-                        _vp_full = _vp + (f"。{tr('Also include')}：{_rdesc}" if _rdesc else "")
-                        _av = params.video_aspect.value
-                        _refimg = _seg_img if _has_img else ""
-                        _sd = int(seg.get("duration") or params.video_clip_duration or 6)
-                        jobs.submit(_sb_tid, "clip", (lambda uid=_uid, p=_vp_full, av=_av,
-                                    md=_sd, ri=_refimg:
-                                    tm.job_generate_clip(_sb_tid, uid, p, av, md, _sb_style, ri)))
-                        st.rerun()
-                # 單段產生/重新產生分鏡圖
-                _img_btn_label = ("🔄 " + tr("Regenerate Image")) if seg.get("image") \
-                    else ("🖼 " + tr("Generate Storyboard Image"))
-                if True:
+                # ── Veo 影片按鈕 / 狀態 ──
+                if _clip_running:
+                    st.info("🎥 " + tr("Generating Segment Clip") + " …")
+                else:
+                    if not _has_img:
+                        st.caption("ℹ️ " + tr("Generate image first for image-to-video"))
+                    if st.button("🎥 " + tr("Generate Segment Clip"), key=f"segvid_{_sb_tid}_{_uid}",
+                                 use_container_width=True, disabled=_img_running):
+                        _vp = st.session_state.get(f"sb_{_sb_tid}_{_uid}_vprompt", seg.get("video_prompt", ""))
+                        if not (_vp or "").strip():
+                            st.error(tr("Video direction required"))
+                        else:
+                            _rdesc = (seg.get("ref_desc") or "").strip()
+                            _vp_full = _vp + (f"。{tr('Also include')}：{_rdesc}" if _rdesc else "")
+                            _av = _aspect_val(params)
+                            _refimg = _seg_img if _has_img else ""
+                            _sd = int(seg.get("duration") or params.video_clip_duration or 6)
+                            jobs.submit(_sb_tid, _clip_key, "clip", (lambda uid=_uid, p=_vp_full,
+                                        av=_av, md=_sd, ri=_refimg:
+                                        tm.job_generate_clip(_sb_tid, uid, p, av, md, _sb_style, ri)))
+                            st.rerun()
+                # ── 分鏡圖按鈕 / 狀態 ──
+                if _img_running:
+                    st.info("🖼 " + tr("Generating image") + " …")
+                else:
+                    _img_btn_label = ("🔄 " + tr("Regenerate Image")) if seg.get("image") \
+                        else ("🖼 " + tr("Generate Storyboard Image"))
                     if st.button(_img_btn_label, key=f"regen_{_sb_tid}_{_uid}",
-                                 use_container_width=True):
+                                 use_container_width=True, disabled=_clip_running):
                         _new_prompt = st.session_state.get(f"sb_{_sb_tid}_{_uid}_prompt", seg.get("prompt", ""))
                         if not (_new_prompt or "").strip():
                             _new_prompt = seg.get("video_prompt", "") or seg.get("script_chunk", "")
-                        # 角色一致性用外型文字（快速）；參考圖只給使用者上傳的元素
                         _appear = ""
                         if _is_drama and _sb_chars:
                             _, _appear = _segment_character_refs(seg, _sb_chars)
@@ -1598,9 +1633,9 @@ if _sb:
                         _img_prompt = _new_prompt + (f"。{tr('Also include')}：{_rdesc}" if _rdesc else "")
                         seg["prompt"] = _new_prompt
                         _save_storyboard_data(_sb_tid, _sb_style, _segments)
-                        _av = params.video_aspect.value
-                        jobs.submit(_sb_tid, "image", (lambda uid=_uid, p=_img_prompt, av=_av,
-                                    ap=_appear, rf=_refs: tm.job_generate_image(
+                        _av = _aspect_val(params)
+                        jobs.submit(_sb_tid, _img_key, "image", (lambda uid=_uid, p=_img_prompt,
+                                    av=_av, ap=_appear, rf=_refs: tm.job_generate_image(
                                         _sb_tid, uid, p, av, _sb_style, ap, rf)))
                         st.rerun()
             with c_text:
@@ -1713,6 +1748,13 @@ if _sb:
 
         st.info(tr("Storyboard Hint"))
 
+        # 沒有任何素材（圖/影片）的段落 → 產生分段影片時會自動補產分鏡圖
+        _no_material = sum(1 for s in _segments
+                           if not (s.get("clip") and os.path.exists(s.get("clip", "")))
+                           and not (s.get("image") and os.path.exists(s.get("image", ""))))
+        if _no_material:
+            st.caption("ℹ️ " + tr("Auto image hint").format(n=_no_material))
+
         # 分段影片動態化：沒有 Veo 影片的段落，用分鏡圖自動生成動態影片（有戲劇感，較貴/久）
         _img_only = sum(1 for s in _segments
                         if not (s.get("clip") and os.path.exists(s.get("clip", "")))
@@ -1724,13 +1766,19 @@ if _sb:
             key=f"automotion_{_sb_tid}",
             help=tr("Auto motion help"))
 
+        # 有個別分鏡圖/影片還在產製時，先擋住批次渲染（等它們完成再一起渲染）
+        _seg_busy = any((k.startswith("img:") or k.startswith("clip:"))
+                        and s.get("status") == "running" for k, s in _all_jobs.items())
+        if _seg_busy:
+            st.caption("⏳ " + tr("Wait for segment jobs before rendering"))
         c_ok, c_save, c_discard = st.columns(3)
         if c_save.button("💾 " + tr("Save & continue later"), use_container_width=True):
             _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="board")
             st.session_state.pop("storyboard", None)
             st.toast("💾 " + tr("Progress saved"))
             st.rerun()
-        if c_ok.button("🎬 " + tr("Render Segments"), use_container_width=True, type="primary"):
+        if c_ok.button("🎬 " + tr("Render Segments"), use_container_width=True, type="primary",
+                       disabled=_seg_busy):
             _appended = []
             for i, seg in enumerate(_segments):
                 _chunk = (seg.get("script_chunk") or "").strip()
@@ -1765,7 +1813,7 @@ if _sb:
             else:
                 _vm = voice.assign_character_voices(_sb_chars)
                 _copied_params = params
-                jobs.submit(_sb_tid, "segments",
+                jobs.submit(_sb_tid, "batch", "segments",
                             (lambda si=_seg_inputs, vm=_vm, am=_auto_motion:
                                 tm.job_render_segments(_sb_tid, _copied_params, vm, si,
                                                        auto_motion=am)),
@@ -1799,7 +1847,7 @@ if _sb:
                     _one = [{"clip": seg.get("clip"), "image": seg.get("image"),
                              "script_chunk": seg.get("script_chunk"),
                              "dialogue_text": seg.get("dialogue_text", ""), "index": i}]
-                    jobs.submit(_sb_tid, "segments",
+                    jobs.submit(_sb_tid, "batch", "segments",
                                 (lambda si=_one, vm=_vm: tm.job_render_segments(
                                     _sb_tid, params, vm, si)), total=1)
                     st.rerun()
@@ -1811,7 +1859,7 @@ if _sb:
             st.toast("💾 " + tr("Progress saved"))
             st.rerun()
         if c_merge.button("✅ " + tr("Confirm & Merge"), use_container_width=True, type="primary"):
-            jobs.submit(_sb_tid, "merge",
+            jobs.submit(_sb_tid, "merge", "merge",
                         (lambda: tm.job_merge(_sb_tid, params)), total=1)
             st.rerun()
         if c_back.button("⬅ " + tr("Back to Storyboard"), use_container_width=True):

@@ -211,6 +211,9 @@
     "Back to projects": "Back to projects",
     "Materials": "Materials",
     "Segment duration": "Segment duration",
-    "Segment duration help": "Length of this segment (Veo supports 4/6/8s). Keep the dialogue/script within this (~duration×4 CJK chars) to avoid the clip looping."
+    "Segment duration help": "Length of this segment (Veo supports 4/6/8s). Keep the dialogue/script within this (~duration×4 CJK chars) to avoid the clip looping.",
+    "Auto image hint": "{n} segment(s) have no image yet — they'll be auto-generated during rendering (takes a bit longer)",
+    "segments generating in parallel": "segment image/clip jobs running in parallel",
+    "Wait for segment jobs before rendering": "Wait for per-segment jobs to finish before rendering all"
   }
 }

@@ -1,10 +1,12 @@
-"""Lightweight background job runner for long generations (segment rendering,
-merging, Veo clips) so the UI doesn't block and the user can switch projects.
+"""Background job runner supporting MULTIPLE concurrent jobs per task, keyed by
+an arbitrary job key, so e.g. several per-segment storyboard images can generate
+in parallel within one project, while batch operations (render all / merge) stay
+exclusive.
 
-A job runs in a daemon thread and writes its status to <task_dir>/job.json.
-The Streamlit UI polls that file (it survives reruns and page switches). Threads
-do not survive a process/container restart — an interrupted job is simply marked
-stale on next read and can be re-submitted.
+State for a task lives in <task_dir>/jobs.json as {job_key: status}. A job runs
+in a daemon thread. Threads do not survive a process/container restart — such a
+job is detected as stale (no live thread) and marked interrupted so the UI
+recovers immediately.
 """
 
 import json
@@ -18,92 +20,126 @@ from loguru import logger
 from app.utils import utils
 
 _lock = threading.Lock()
-# In-process registry of live threads, so we can tell "running" from "stale"
-# (a job.json left as running after a restart, with no live thread).
+# (task_id, key) -> Thread, for the current process's live jobs.
 _threads = {}
 
 
-def _job_file(task_id: str) -> str:
-    return os.path.join(utils.task_dir(task_id), "job.json")
+def _jobs_file(task_id: str) -> str:
+    return os.path.join(utils.task_dir(task_id), "jobs.json")
 
 
-def read_status(task_id: str):
+def _read_raw(task_id: str) -> dict:
     try:
-        with open(_job_file(task_id), "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(_jobs_file(task_id), "r", encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
     except Exception:
-        return None
+        return {}
 
 
-def _write(task_id: str, data: dict):
+def _write_all(task_id: str, d: dict):
+    path = _jobs_file(task_id)
+    if not d:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        return
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def read_all(task_id: str) -> dict:
+    """Return {key: status}. Any 'running' job with no live thread (e.g. after a
+    restart) is marked as interrupted so the UI won't hang."""
+    d = _read_raw(task_id)
+    changed = False
+    for key, s in list(d.items()):
+        if s.get("status") == "running":
+            th = _threads.get((task_id, key))
+            if th is None or not th.is_alive():
+                s["status"] = "error"
+                s["error"] = "背景任務已中斷（伺服器重啟過），請重新產製（已完成的素材會沿用）"
+                changed = True
+    if changed:
+        with _lock:
+            _write_all(task_id, d)
+    return d
+
+
+def read_status(task_id: str, key: str):
+    return read_all(task_id).get(key)
+
+
+def is_running(task_id: str, key: str = None) -> bool:
+    """key=None → any job running for the task; else that specific job."""
+    d = read_all(task_id)
+    if key is not None:
+        s = d.get(key)
+        return bool(s and s.get("status") == "running")
+    return any(s.get("status") == "running" for s in d.values())
+
+
+def running_keys(task_id: str) -> list:
+    return [k for k, s in read_all(task_id).items() if s.get("status") == "running"]
+
+
+def update_progress(task_id: str, key: str, done: int, total: int, note: str = ""):
     with _lock:
-        path = _job_file(task_id)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-        os.replace(tmp, path)
+        d = _read_raw(task_id)
+        s = d.get(key, {})
+        s.update({"progress_done": done, "progress_total": total, "note": note,
+                  "heartbeat": time.time()})
+        d[key] = s
+        _write_all(task_id, d)
 
 
-def is_running(task_id: str) -> bool:
-    s = read_status(task_id)
-    if not s or s.get("status") != "running":
+def submit(task_id: str, key: str, kind: str, fn, total: int = 0) -> bool:
+    """Run fn() in a background thread under job `key`. Returns False if a job
+    with the same key is already running (different keys run concurrently)."""
+    if is_running(task_id, key):
         return False
-    # A live job ALWAYS has its thread registered in this process. If job.json
-    # says "running" but there's no live thread (e.g. the container/process was
-    # restarted mid-job — threads don't survive that), it's stale: mark it as
-    # interrupted so the UI recovers immediately instead of hanging.
-    th = _threads.get(task_id)
-    if th is not None and th.is_alive():
-        return True
-    s["status"] = "error"
-    s["error"] = "背景任務已中斷（伺服器重啟過），請重新產製（已完成的素材會沿用）"
-    _write(task_id, s)
-    return False
-
-
-def update_progress(task_id: str, done: int, total: int, note: str = ""):
-    s = read_status(task_id) or {}
-    s.update({"progress_done": done, "progress_total": total, "note": note,
-              "heartbeat": time.time()})
-    _write(task_id, s)
-
-
-def submit(task_id: str, kind: str, fn, total: int = 0) -> bool:
-    """Run fn() in a background thread. fn must be self-contained (no Streamlit
-    calls) and return a JSON-serializable result (or None). Returns False if a
-    job is already running for this task."""
-    if is_running(task_id):
-        return False
-    _write(task_id, {"status": "running", "kind": kind, "started_at": time.time(),
-                     "heartbeat": time.time(), "progress_done": 0,
-                     "progress_total": total, "note": ""})
+    with _lock:
+        d = _read_raw(task_id)
+        d[key] = {"status": "running", "kind": kind, "started_at": time.time(),
+                  "heartbeat": time.time(), "progress_done": 0,
+                  "progress_total": total, "note": ""}
+        _write_all(task_id, d)
 
     def _run():
         try:
             result = fn()
-            s = read_status(task_id) or {}
-            s.update({"status": "done", "kind": kind, "finished_at": time.time(),
-                      "result": result if isinstance(result, dict) else {}})
-            _write(task_id, s)
-            logger.success(f"background job done: task={task_id} kind={kind}")
+            with _lock:
+                d = _read_raw(task_id)
+                s = d.get(key, {})
+                s.update({"status": "done", "kind": kind, "finished_at": time.time(),
+                          "result": result if isinstance(result, dict) else {}})
+                d[key] = s
+                _write_all(task_id, d)
+            logger.success(f"background job done: task={task_id} key={key} kind={kind}")
         except Exception as e:
-            s = read_status(task_id) or {}
-            s.update({"status": "error", "kind": kind, "finished_at": time.time(),
-                      "error": str(e), "trace": traceback.format_exc()[-1200:]})
-            _write(task_id, s)
-            logger.error(f"background job failed: task={task_id} kind={kind}: {e}")
+            with _lock:
+                d = _read_raw(task_id)
+                s = d.get(key, {})
+                s.update({"status": "error", "kind": kind, "finished_at": time.time(),
+                          "error": str(e), "trace": traceback.format_exc()[-1000:]})
+                d[key] = s
+                _write_all(task_id, d)
+            logger.error(f"background job failed: task={task_id} key={key}: {e}")
         finally:
-            _threads.pop(task_id, None)
+            _threads.pop((task_id, key), None)
 
     th = threading.Thread(target=_run, daemon=True)
-    _threads[task_id] = th
+    _threads[(task_id, key)] = th
     th.start()
     return True
 
 
-def clear(task_id: str):
-    try:
-        os.remove(_job_file(task_id))
-    except Exception:
-        pass
-    _threads.pop(task_id, None)
+def clear(task_id: str, key: str):
+    with _lock:
+        d = _read_raw(task_id)
+        d.pop(key, None)
+        _write_all(task_id, d)
+    _threads.pop((task_id, key), None)

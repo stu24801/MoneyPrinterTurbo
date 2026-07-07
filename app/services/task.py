@@ -46,6 +46,12 @@ def _seg_sig(s):
          + (s.get("clip") or s.get("image") or "")).encode("utf-8")).hexdigest()[:12]
 
 
+def _aspect_value(params):
+    """params.video_aspect may be a VideoAspect enum or a raw string ('9:16')."""
+    a = params.video_aspect
+    return a.value if hasattr(a, "value") else a
+
+
 # ── Background job orchestration (run inside jobs.submit threads) ──────────────
 def job_generate_image(task_id, uid, prompt, aspect_value, style, appearance, ref_images):
     """Generate one segment's storyboard image and persist it by uid."""
@@ -98,22 +104,53 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
     rather than a static zoom."""
     total = len(seg_inputs)
     rendered = 0
-    style = _load_sb(task_id).get("style", "")
+    _sb0 = _load_sb(task_id)
+    style = _sb0.get("style", "")
+    characters = _sb0.get("characters", [])
     for pos, inp in enumerate(seg_inputs):
         idx = int(inp.get("index", pos))
         data = _load_sb(task_id)
         segs = data.get("segments", [])
+        # 自愈：段落沒有分鏡圖也沒有影片 → 先自動產生分鏡圖（否則無法渲染）
+        if 0 <= idx < len(segs):
+            s = segs[idx]
+            _clip = s.get("clip") or ""
+            _image = s.get("image") or ""
+            _has_clip = _clip and os.path.exists(_clip)
+            _has_image = _image and os.path.exists(_image)
+            if not _has_clip and not _has_image:
+                jobs.update_progress(task_id, "batch", pos, total, f"segment {idx + 1} · image")
+                _iprompt = (s.get("prompt") or s.get("video_prompt")
+                            or s.get("scene") or s.get("dialogue_text")
+                            or s.get("script_chunk") or "cinematic scene")
+                # 戲劇模式：帶入該段角色外型，維持一致長相
+                _appear = ""
+                if characters:
+                    _spk = {ln["speaker"] for ln in voice.parse_dialogue_lines(
+                        s.get("dialogue_text", "") or "") if ln.get("speaker")}
+                    _present = [c for c in characters if c.get("name") in _spk] or characters
+                    _appear = "；".join(f"{c.get('name','')}：{c.get('appearance','')}"
+                                        for c in _present if c.get("appearance"))
+                _img = material.generate_single_image_llm(
+                    task_id, _iprompt, VideoAspect(_aspect_value(params)),
+                    index=s.get("uid", idx), style=style, appearance=_appear)
+                if _img:
+                    data = _load_sb(task_id)
+                    segs = data.get("segments", [])
+                    segs[idx]["image"] = _img
+                    inp["image"] = _img
+                    _save_sb(task_id, data)
         # Auto-motion: image-only segment → generate a Veo clip first
         if auto_motion and 0 <= idx < len(segs):
             s = segs[idx]
             clip = s.get("clip") or ""
             image = s.get("image") or ""
             if (not clip or not os.path.exists(clip)) and image and os.path.exists(image):
-                jobs.update_progress(task_id, pos, total, f"segment {idx + 1} · motion")
+                jobs.update_progress(task_id, "batch", pos, total, f"segment {idx + 1} · motion")
                 vdir = s.get("video_prompt") or s.get("dialogue_text") or s.get("script_chunk") or ""
                 _seg_dur = int(s.get("duration") or params.video_clip_duration or 6)
                 vid = material.generate_single_video_llm(
-                    task_id, vdir, VideoAspect(params.video_aspect.value),
+                    task_id, vdir, VideoAspect(_aspect_value(params)),
                     max_clip_duration=_seg_dur, index=s.get("uid", idx),
                     style=style, reference_image=image)
                 if vid:
@@ -131,7 +168,7 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
             segs[idx]["rendered_sig"] = _seg_sig(segs[idx])
             rendered += 1
             _save_sb(task_id, data)
-        jobs.update_progress(task_id, pos + 1, total, f"segment {idx + 1}")
+        jobs.update_progress(task_id, "batch", pos + 1, total, f"segment {idx + 1}")
     data = _load_sb(task_id)
     data["stage"] = "segments"
     _save_sb(task_id, data)
