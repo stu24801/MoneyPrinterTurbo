@@ -1204,6 +1204,54 @@ def _save_storyboard_data(task_id: str, style: str, segments: list, characters=N
                   f, ensure_ascii=False, indent=2)
 
 
+def _ensure_character_refs(task_id, characters, style, aspect):
+    """Lazily give each character a fixed appearance + a reference portrait so
+    their look stays consistent across segment images. Mutates & persists
+    characters (adds 'appearance' and 'ref_image'). Returns True if changed."""
+    if not characters:
+        return False
+    changed = False
+    # 1. fill in missing appearances in one LLM call
+    missing = [c for c in characters if not (c.get("appearance") or "").strip()]
+    if missing:
+        appmap = llm.generate_character_appearances(
+            characters, style=style,
+            language=st.session_state.get("ui_language", ""))
+        for c in characters:
+            if not (c.get("appearance") or "").strip() and c.get("name") in appmap:
+                c["appearance"] = appmap[c["name"]]
+                changed = True
+    # 2. generate a reference portrait per character if missing
+    for c in characters:
+        rp = c.get("ref_image", "")
+        if rp and os.path.exists(rp):
+            continue
+        if not (c.get("appearance") or "").strip():
+            continue
+        img = material.generate_character_reference(
+            task_id, c.get("name", ""), c.get("appearance", ""), aspect, style=style)
+        if img:
+            c["ref_image"] = img
+            changed = True
+    return changed
+
+
+def _segment_character_refs(seg, characters):
+    """Return (ref_image_paths, combined_appearance) for the characters that
+    appear in this segment's dialogue (fallback: all characters)."""
+    if not characters:
+        return [], ""
+    names = set()
+    for ln in voice.parse_dialogue_lines(seg.get("dialogue_text", "") or ""):
+        if ln.get("speaker"):
+            names.add(ln["speaker"].strip())
+    present = [c for c in characters if c.get("name") in names] or characters
+    refs = [c["ref_image"] for c in present if c.get("ref_image") and os.path.exists(c["ref_image"])]
+    appearance = "；".join(f"{c.get('name','')}：{c.get('appearance','')}"
+                          for c in present if c.get("appearance"))
+    return refs, appearance
+
+
 def _build_storyboard(task_id: str, materials: list, segment_count: int = 0, drama: dict = None) -> list:
     """Build (and persist) the editable storyboard for a task: per-segment
     script chunk, image prompt, LLM-generated transition note and must-say line."""
@@ -1413,9 +1461,11 @@ if _sb:
                     if not (_vp or "").strip():
                         st.error(tr("Video direction required"))
                     else:
+                        _rdesc = (seg.get("ref_desc") or "").strip()
+                        _vp_full = _vp + (f"。{tr('Also include')}：{_rdesc}" if _rdesc else "")
                         with st.spinner(tr("Generating Segment Clip Wait")):
                             _vid = material.generate_single_video_llm(
-                                _sb_tid, _vp, params.video_aspect,
+                                _sb_tid, _vp_full, params.video_aspect,
                                 max_clip_duration=params.video_clip_duration, index=_uid,
                                 style=_sb_style,
                                 reference_image=_seg_img if _has_img else "",
@@ -1436,10 +1486,20 @@ if _sb:
                         _new_prompt = st.session_state.get(f"sb_{_sb_tid}_{_uid}_prompt", seg.get("prompt", ""))
                         if not (_new_prompt or "").strip():
                             _new_prompt = seg.get("video_prompt", "") or seg.get("script_chunk", "")
+                        _refs, _appear = [], ""
+                        if _is_drama and _sb_chars:
+                            with st.spinner(tr("Preparing character references")):
+                                if _ensure_character_refs(_sb_tid, _sb_chars, _sb_style, params.video_aspect):
+                                    _save_storyboard_data(_sb_tid, _sb_style, _segments, characters=_sb_chars)
+                            _refs, _appear = _segment_character_refs(seg, _sb_chars)
+                        # 加入該段上傳的參考圖與說明
+                        _refs = _refs + [p for p in seg.get("ref_uploads", []) if os.path.exists(p)]
+                        _rdesc = (seg.get("ref_desc") or "").strip()
+                        _img_prompt = _new_prompt + (f"。{tr('Also include')}：{_rdesc}" if _rdesc else "")
                         with st.spinner(tr("Regenerating Image")):
                             _img = material.generate_single_image_llm(
-                                _sb_tid, _new_prompt, params.video_aspect, index=_uid,
-                                style=_sb_style,
+                                _sb_tid, _img_prompt, params.video_aspect, index=_uid,
+                                style=_sb_style, reference_images=_refs, appearance=_appear,
                             )
                             if _img:
                                 seg["image"] = _img
@@ -1499,6 +1559,45 @@ if _sb:
                     index=_fx_opts.index(_cur_fx) if _cur_fx in _fx_opts else 0,
                     format_func=lambda x: _fx_labels.get(x, x),
                     key=f"sb_{_sb_tid}_{_uid}_fx")
+
+                # 參考素材：上傳圖片 + 說明，補充特定元素到分鏡圖與素材影片
+                with st.expander("🖼 " + tr("Reference materials") +
+                                 (f"（{len(seg.get('ref_uploads', []))}）" if seg.get("ref_uploads") else "")):
+                    seg["ref_desc"] = st.text_input(
+                        tr("Reference description"), value=seg.get("ref_desc", ""),
+                        key=f"sb_{_sb_tid}_{_uid}_refdesc", placeholder=tr("Reference desc placeholder"))
+                    _ups = st.file_uploader(
+                        tr("Upload reference images"), type=["png", "jpg", "jpeg"],
+                        accept_multiple_files=True, key=f"sb_{_sb_tid}_{_uid}_refup")
+                    if _ups:
+                        _saved = seg.get("ref_uploads", [])
+                        _existing = {os.path.basename(p) for p in _saved}
+                        for _up in _ups:
+                            _rn = f"seg-ref-{_uid}-{_up.name}"
+                            if _rn in _existing:
+                                continue
+                            _rp = os.path.join(utils.task_dir(_sb_tid), _rn)
+                            with open(_rp, "wb") as _f:
+                                _f.write(_up.getbuffer())
+                            _saved.append(_rp)
+                        if _saved != seg.get("ref_uploads", []):
+                            seg["ref_uploads"] = _saved
+                            _save_storyboard_data(_sb_tid, _sb_style, _segments)
+                            st.rerun()
+                    _cur_ups = [p for p in seg.get("ref_uploads", []) if os.path.exists(p)]
+                    if _cur_ups:
+                        _rcols = st.columns(min(len(_cur_ups), 4))
+                        for _ri, _rp in enumerate(_cur_ups[:4]):
+                            with _rcols[_ri]:
+                                st.image(_rp, use_container_width=True)
+                                if st.button("🗑", key=f"rmref_{_sb_tid}_{_uid}_{_ri}"):
+                                    try:
+                                        os.remove(_rp)
+                                    except OSError:
+                                        pass
+                                    seg["ref_uploads"] = [p for p in seg.get("ref_uploads", []) if p != _rp]
+                                    _save_storyboard_data(_sb_tid, _sb_style, _segments)
+                                    st.rerun()
 
         if st.button("➕ " + tr("Add Segment"), key=f"addseg_{_sb_tid}", use_container_width=True):
             _segments.append({

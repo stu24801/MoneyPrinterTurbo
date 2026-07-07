@@ -187,6 +187,12 @@
     "Scene": "場景",
     "Dialogue": "劇情台詞（可編輯）",
     "Dialogue Help": "每行格式：角色名（情感）：台詞。情感可用 平靜/開心/激動/悲傷/嚴肅/溫柔/疑惑/緊張/豪爽。不同角色會用不同聲線演出。",
-    "Generate image first for image-to-video": "建議先產生此段分鏡圖，產影片時會以分鏡圖為畫面基準（圖生影片）；未產圖則以文字生成"
+    "Generate image first for image-to-video": "建議先產生此段分鏡圖，產影片時會以分鏡圖為畫面基準（圖生影片）；未產圖則以文字生成",
+    "Preparing character references": "正在準備角色參考圖（維持角色一致外型）...",
+    "Reference materials": "參考素材（上傳圖片補充特定元素）",
+    "Reference description": "參考說明（描述要加入的元素）",
+    "Reference desc placeholder": "例如：戴紅色帽子、桌上放一杯珍奶",
+    "Upload reference images": "上傳參考圖片（可多張，套用到分鏡圖與素材影片）",
+    "Also include": "並加入以下元素"
   }
 }

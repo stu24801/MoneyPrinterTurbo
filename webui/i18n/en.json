@@ -186,6 +186,12 @@
     "Scene": "Scene",
     "Dialogue": "Dialogue (editable)",
     "Dialogue Help": "Per line: Name（emotion）：line. Each character is voiced with a distinct voice.",
-    "Generate image first for image-to-video": "Generate this segment's image first — the clip will use it as the visual anchor (image-to-video); otherwise text-to-video"
+    "Generate image first for image-to-video": "Generate this segment's image first — the clip will use it as the visual anchor (image-to-video); otherwise text-to-video",
+    "Preparing character references": "Preparing character references (consistent look)...",
+    "Reference materials": "Reference materials (upload images to add elements)",
+    "Reference description": "Reference description (elements to include)",
+    "Reference desc placeholder": "e.g. wearing a red hat, a cup of bubble tea on the table",
+    "Upload reference images": "Upload reference images (applied to image & clip)",
+    "Also include": "Also include"
   }
 }

@@ -342,9 +342,15 @@ def generate_single_image_llm(
     video_aspect: VideoAspect = VideoAspect.portrait,
     index: int = 0,
     style: str = "",
+    reference_images: list = None,
+    appearance: str = "",
+    out_name: str = "",
 ) -> str:
-    """(Re)generate one storyboard image with a user-edited prompt.
-    Overwrites llm-image-{index}.png in the task dir; returns the path or ""."""
+    """(Re)generate one storyboard image. When reference_images (paths to
+    character reference portraits) are given, they are passed to the image model
+    so recurring characters keep a CONSISTENT appearance across segments;
+    appearance is an optional locked physical description appended to the prompt.
+    Writes llm-image-{index}.png (or out_name) in the task dir; returns path or ""."""
     import base64
 
     base_url = config.app.get("openai_base_url", "").rstrip("/")
@@ -355,10 +361,32 @@ def generate_single_image_llm(
     aspect = VideoAspect(video_aspect)
     ratio = {"landscape": "16:9", "portrait": "9:16", "square": "1:1"}.get(aspect.name, "9:16")
     style_part = f" Visual style: {style.strip()}." if (style or "").strip() else ""
+    appearance_part = f" Keep these characters' appearance EXACTLY consistent: {appearance.strip()}." \
+        if (appearance or "").strip() else ""
+    ref_note = " Use the provided reference image(s) as the exact appearance of the character(s)." \
+        if reference_images else ""
     full_prompt = (
-        f"A high quality, photorealistic, cinematic stock photo of: {prompt}.{style_part} "
-        "No text, no watermark, no captions."
+        f"A high quality, photorealistic, cinematic stock photo of: {prompt}.{style_part}"
+        f"{appearance_part}{ref_note} No text, no watermark, no captions."
     )
+
+    # Build user content — attach reference images as image_url parts so the
+    # proxy routes to images/edits with them.
+    user_content = full_prompt
+    valid_refs = [p for p in (reference_images or []) if p and os.path.exists(p)]
+    if valid_refs:
+        parts = [{"type": "text", "text": full_prompt}]
+        for rp in valid_refs[:4]:  # cap to keep the edit request bounded
+            try:
+                with open(rp, "rb") as f:
+                    b64ref = base64.b64encode(f.read()).decode()
+                mime = "image/png" if rp.lower().endswith(".png") else "image/jpeg"
+                parts.append({"type": "image_url",
+                              "image_url": {"url": f"data:{mime};base64,{b64ref}"}})
+            except Exception as e:
+                logger.warning(f"skip reference image {rp}: {e}")
+        user_content = parts
+
     try:
         resp = requests.post(
             f"{base_url}/chat/completions",
@@ -368,7 +396,7 @@ def generate_single_image_llm(
                 "modalities": ["image"],
                 "messages": [
                     {"role": "system", "content": f"aspect_ratio={ratio}"},
-                    {"role": "user", "content": full_prompt},
+                    {"role": "user", "content": user_content},
                 ],
             },
             timeout=300,
@@ -378,14 +406,30 @@ def generate_single_image_llm(
         b64 = next((p.get("data") for p in mod if p.get("type") == "image"), None)
         if not b64:
             return ""
-        image_path = os.path.join(utils.task_dir(task_id), f"llm-image-{index}.png")
+        fname = out_name or f"llm-image-{index}.png"
+        image_path = os.path.join(utils.task_dir(task_id), fname)
         with open(image_path, "wb") as f:
             f.write(base64.b64decode(b64))
-        logger.success(f"storyboard image regenerated: {image_path}")
+        logger.success(f"storyboard image generated: {image_path} (refs={len(valid_refs)})")
         return image_path
     except Exception as e:
-        logger.error(f"failed to regenerate image: {str(e)}")
+        logger.error(f"failed to generate image: {str(e)}")
         return ""
+
+
+def generate_character_reference(task_id: str, char_name: str, appearance: str,
+                                 video_aspect: VideoAspect = VideoAspect.portrait,
+                                 style: str = "") -> str:
+    """Generate a one-time reference portrait for a character (its 'model sheet'),
+    used to keep the character's appearance consistent across all segment images.
+    Writes char-ref-{safe_name}.png; returns path or ""."""
+    import re as _re
+    safe = _re.sub(r"[^\w\-]", "_", char_name)[:24] or "char"
+    prompt = (f"Full-body character reference portrait of {char_name}: {appearance}. "
+              "Single character, neutral background, clear front view, consistent design")
+    return generate_single_image_llm(
+        task_id, prompt, video_aspect, style=style,
+        out_name=f"char-ref-{safe}.png")
 
 
 def generate_single_video_llm(

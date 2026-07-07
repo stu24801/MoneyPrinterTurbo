@@ -476,6 +476,57 @@ Please note that you must use English for generating video search terms; Chinese
     return search_terms
 
 
+def generate_character_appearances(characters: list, style: str = "", language: str = "") -> dict:
+    """Produce a FIXED, detailed physical appearance for each character so their
+    look stays consistent across all generated images. Returns {name: appearance}.
+    Appearance is concrete and visual (age, build, hair, face, signature outfit,
+    colors) — the kind of detail an image model needs to reproduce a person."""
+    if not characters:
+        return {}
+    lines = []
+    for c in characters:
+        nm = (c.get("name") or "").strip()
+        if nm:
+            lines.append(f"{nm}｜{c.get('gender','')}｜{c.get('desc','')}")
+    if not lines:
+        return {}
+    lang_hint = f"Write appearances in {language}." if language else \
+        "Write appearances in the same language as the character info."
+    style_hint = f" Overall film style: {style}." if style else ""
+    prompt = f"""
+# Role: Character Designer
+
+## Goal:
+For each character below, write ONE fixed, detailed VISUAL appearance description that an image generator can reproduce consistently every time (concrete and stable): approximate age, gender, body build, hair (color/length/style), face features, and a signature outfit with specific colors.{style_hint}
+
+## Constraints:
+1. Return ONLY a json object mapping character name -> appearance string.
+2. Each appearance under 60 characters if Chinese (25 words otherwise); purely physical/visual, no personality, no scene.
+3. Keep them distinct so characters are visually distinguishable.
+4. {lang_hint}
+
+## Characters (name｜gender｜persona):
+{chr(10).join(lines)}
+
+## Output Example:
+{{"小明": "25歲男性，中等身材，黑色短髮，圓框眼鏡，白襯衫配深藍色針織背心", "美麗": "30歲女性，長捲髮棕色，鵝蛋臉，米色針織衫配長裙"}}
+""".strip()
+    for _ in range(_max_retries):
+        try:
+            response = _generate_response(prompt)
+            if "Error: " in response:
+                continue
+            m = re.search(r"\{.*\}", response, re.DOTALL)
+            if not m:
+                continue
+            data = json.loads(m.group(0))
+            if isinstance(data, dict) and data:
+                return {str(k): str(v)[:200] for k, v in data.items()}
+        except Exception as e:
+            logger.warning(f"character appearance generation failed: {e}")
+    return {}
+
+
 def generate_drama_storyboard(video_script: str, n: int, target_duration: int = 0) -> dict:
     """Drama (character performance) storyboard: the outline is only a structural
     reference — output a cast of characters and per-segment plot with emotional
