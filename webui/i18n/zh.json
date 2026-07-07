@@ -215,6 +215,10 @@
     "Segment duration help": "这一段视频的长度（Veo 动态视频原生支持 4/6/8 秒）。台词/文案长度请控制在此秒数内（约 秒数×4 个中文字），避免视频循环重复。",
     "Auto image hint": "有 {n} 段尚未生成分镜图，生成分段视频时会自动补生成（会多花一些时间）",
     "segments generating in parallel": "段分镜图/视频并行生成中（可继续点其他段一起生成）",
-    "Wait for segment jobs before rendering": "有段落分镜图/视频还在生成，完成后再生成分段视频"
+    "Wait for segment jobs before rendering": "有段落分镜图/视频还在生成，完成后再生成分段视频",
+    "Insert above": "上方插入",
+    "(at end)": "（加在最后）",
+    "Use segment transitions": "使用段落进场转场",
+    "Use transitions help": "开启时，各段依自己的「进场转场」设定（淡入/黑场/滑入）衔接；关闭时全部用硬切，让演绎连续不被转场打断。"
   }
 }

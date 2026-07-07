@@ -214,6 +214,10 @@
     "Segment duration help": "Length of this segment (Veo supports 4/6/8s). Keep the dialogue/script within this (~duration×4 CJK chars) to avoid the clip looping.",
     "Auto image hint": "{n} segment(s) have no image yet — they'll be auto-generated during rendering (takes a bit longer)",
     "segments generating in parallel": "segment image/clip jobs running in parallel",
-    "Wait for segment jobs before rendering": "Wait for per-segment jobs to finish before rendering all"
+    "Wait for segment jobs before rendering": "Wait for per-segment jobs to finish before rendering all",
+    "Insert above": "Insert above",
+    "(at end)": " (at end)",
+    "Use segment transitions": "Use segment transitions",
+    "Use transitions help": "On: each segment uses its own entrance transition (fade/dip/slide). Off: hard cuts everywhere so the performance flows continuously without interruption."
   }
 }

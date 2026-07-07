@@ -215,6 +215,10 @@
     "Segment duration help": "這一段影片的長度（Veo 動態影片原生支援 4/6/8 秒）。台詞/文案長度請控制在此秒數內（約 秒數×4 個中文字），避免影片循環重複。",
     "Auto image hint": "有 {n} 段尚未產生分鏡圖，產生分段影片時會自動補產（會多花一些時間）",
     "segments generating in parallel": "段分鏡圖/影片並行產製中（可繼續點其他段一起產）",
-    "Wait for segment jobs before rendering": "有段落分鏡圖/影片還在產製，完成後再產生分段影片"
+    "Wait for segment jobs before rendering": "有段落分鏡圖/影片還在產製，完成後再產生分段影片",
+    "Insert above": "上方插入",
+    "(at end)": "（加在最後）",
+    "Use segment transitions": "使用段落進場轉場",
+    "Use transitions help": "開啟時，各段依自己的「進場轉場」設定（淡入/黑場/滑入）銜接；關閉時全部用硬切，讓演繹連續不被轉場打斷。"
   }
 }

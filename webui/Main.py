@@ -1377,6 +1377,12 @@ def _aspect_val(params):
     return a.value if hasattr(a, "value") else a
 
 
+def _new_segment():
+    return {"uid": uuid4().hex[:8], "clip": "", "image": "", "prompt": "",
+            "script_chunk": "", "dialogue_text": "", "scene": "", "transition_note": "",
+            "must_say": "", "video_prompt": "", "transition_effect": "none", "duration": 0}
+
+
 def _render_job_panel(task_id, job):
     """Show progress for a background job; user can leave & switch projects."""
     st.divider()
@@ -1560,9 +1566,15 @@ if _sb:
         st.caption(_dur_msg)
         for i, seg in enumerate(_segments):
             _uid = seg.get("uid", str(i))
-            _hdr_l, _hdr_r = st.columns([5, 1])
+            _hdr_l, _hdr_ins, _hdr_r = st.columns([4, 1, 1])
             _hdr_l.markdown(f"##### 🎬 {tr('Segment')} {i + 1}")
-            if _hdr_r.button("🗑 " + tr("Remove Segment"), key=f"rmseg_{_sb_tid}_{_uid}"):
+            if _hdr_ins.button("➕ " + tr("Insert above"), key=f"insseg_{_sb_tid}_{_uid}",
+                               use_container_width=True):
+                _segments.insert(i, _new_segment())
+                _save_storyboard_data(_sb_tid, _sb_style, _segments)
+                st.rerun()
+            if _hdr_r.button("🗑 " + tr("Remove Segment"), key=f"rmseg_{_sb_tid}_{_uid}",
+                             use_container_width=True):
                 _segments.pop(i)
                 _save_storyboard_data(_sb_tid, _sb_style, _segments)
                 st.rerun()
@@ -1734,12 +1746,9 @@ if _sb:
                                     _save_storyboard_data(_sb_tid, _sb_style, _segments)
                                     st.rerun()
 
-        if st.button("➕ " + tr("Add Segment"), key=f"addseg_{_sb_tid}", use_container_width=True):
-            _segments.append({
-                "uid": uuid4().hex[:8], "clip": "", "image": "", "prompt": "",
-                "script_chunk": "", "transition_note": "", "must_say": "",
-                "video_prompt": "", "transition_effect": "none",
-            })
+        if st.button("➕ " + tr("Add Segment") + tr("(at end)"), key=f"addseg_{_sb_tid}",
+                     use_container_width=True):
+            _segments.append(_new_segment())
             _save_storyboard_data(_sb_tid, _sb_style, _segments)
             st.rerun()
 
@@ -1852,6 +1861,10 @@ if _sb:
                                     _sb_tid, params, vm, si)), total=1)
                     st.rerun()
 
+        # 是否使用段落進場轉場（關閉＝連續演繹，不被轉場打斷）
+        _use_fx = st.checkbox("🎞 " + tr("Use segment transitions"),
+                              value=st.session_state.get(f"usefx_{_sb_tid}", True),
+                              key=f"usefx_{_sb_tid}", help=tr("Use transitions help"))
         c_merge, c_back, c_save2, c_drop = st.columns(4)
         if c_save2.button("💾 " + tr("Save & continue later"), use_container_width=True):
             _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="segments")
@@ -1860,7 +1873,8 @@ if _sb:
             st.rerun()
         if c_merge.button("✅ " + tr("Confirm & Merge"), use_container_width=True, type="primary"):
             jobs.submit(_sb_tid, "merge", "merge",
-                        (lambda: tm.job_merge(_sb_tid, params)), total=1)
+                        (lambda uf=_use_fx: tm.job_merge(_sb_tid, params, use_transitions=uf)),
+                        total=1)
             st.rerun()
         if c_back.button("⬅ " + tr("Back to Storyboard"), use_container_width=True):
             st.session_state["storyboard"]["stage"] = "board"

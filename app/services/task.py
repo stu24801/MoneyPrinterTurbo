@@ -175,12 +175,17 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
     return {"rendered": rendered, "total": total}
 
 
-def job_merge(task_id, params: VideoParams):
-    """Merge all rendered segment videos into the final film."""
+def job_merge(task_id, params: VideoParams, use_transitions=True):
+    """Merge all rendered segment videos into the final film. When
+    use_transitions is False, segments are joined with hard cuts (no fade/slide)
+    so the performance flows continuously without being interrupted."""
     data = _load_sb(task_id)
     segs = data.get("segments", [])
     files = [s.get("segment_video") for s in segs]
-    fx = [s.get("transition_effect", "none") for s in segs]
+    if use_transitions:
+        fx = [s.get("transition_effect", "none") for s in segs]
+    else:
+        fx = ["none"] * len(segs)
     fin = merge_segments(task_id, params, files, transitions=fx)
     if not fin or not fin.get("videos"):
         raise RuntimeError("merge produced no video")
