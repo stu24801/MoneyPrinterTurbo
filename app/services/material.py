@@ -476,23 +476,63 @@ def generate_single_video_llm(
             logger.info(f"segment video uses reference image: {os.path.basename(reference_image)}")
         except Exception as e:
             logger.warning(f"failed to read reference image, falling back to text-to-video: {e}")
-    try:
-        resp = requests.post(
-            f"{base_url}/videos/generations",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json=payload,
-            timeout=660,
-        )
-        resp.raise_for_status()
-        b64 = resp.json()["data"][0]["b64_json"]
-        video_path = os.path.join(utils.task_dir(task_id), f"llm-video-{index}.mp4")
-        with open(video_path, "wb") as f:
-            f.write(base64.b64decode(b64))
-        logger.success(f"storyboard segment video generated: {video_path} ({duration}s)")
-        return video_path
-    except Exception as e:
-        logger.error(f"failed to generate segment video: {str(e)}")
-        return ""
+    import time as _time
+    video_path = os.path.join(utils.task_dir(task_id), f"llm-video-{index}.mp4")
+
+    def _post_veo(pl):
+        """送一次 Veo 請求；瞬態失敗（502/503/504/超時）退避重試最多 3 次。
+        成功回傳 video_path，全部失敗回傳 ("", 錯誤字串)。"""
+        _last = ""
+        for _attempt in range(3):
+            try:
+                resp = requests.post(
+                    f"{base_url}/videos/generations",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json=pl, timeout=660,
+                )
+                resp.raise_for_status()
+                b64 = resp.json()["data"][0]["b64_json"]
+                with open(video_path, "wb") as f:
+                    f.write(base64.b64decode(b64))
+                logger.success(f"storyboard segment video generated: {video_path} ({duration}s)")
+                return video_path, ""
+            except Exception as e:
+                _last = str(e)
+                _body = ""
+                try:
+                    _body = e.response.text if getattr(e, "response", None) is not None else ""
+                except Exception:
+                    pass
+                # Veo 內容審查拒絕（圖片/提示違反使用規範）不是瞬態，重試無用
+                if "usage guidelines" in _body or "violates" in _body or "Support codes" in _body:
+                    logger.warning(f"segment video rejected by Veo content policy: {_body[:200]}")
+                    return "", "content_policy"
+                _status = getattr(getattr(e, "response", None), "status_code", None)
+                _transient = _status in (429, 500, 502, 503, 504) or isinstance(
+                    e, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
+                if _transient and _attempt < 2:
+                    _wait = 5 * (_attempt + 1)
+                    logger.warning(f"segment video attempt {_attempt + 1} failed "
+                                   f"({_status or type(e).__name__}), retry in {_wait}s")
+                    _time.sleep(_wait)
+                    continue
+                break
+        return "", _last
+
+    vid, err = _post_veo(payload)
+    if vid:
+        return vid
+    # image-to-video 因參考圖被 Veo 內容審查拒絕（或其他失敗）→ 改用純文字生成，
+    # 讓該段仍是動態演繹而非靜態圖 zoom。
+    if payload.get("image_b64"):
+        logger.warning("image-to-video failed，改用純文字 text-to-video 重試該段")
+        payload.pop("image_b64", None)
+        payload.pop("image_mime", None)
+        vid, err = _post_veo(payload)
+        if vid:
+            return vid
+    logger.error(f"failed to generate segment video after retries: {err}")
+    return ""
 
 
 def generate_videos_llm(
