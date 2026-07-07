@@ -1,0 +1,9 @@
+[server]
+# 關閉檔案監視：torch/demucs 已知會讓 Streamlit 的 file watcher 遍歷
+# torch.classes.__path__._path 時拋 RuntimeError（torch::class_ / no running
+# event loop），導致頁面報錯、故事版產製流程被打斷、進度未保存。
+# 生產 docker 部署不需熱重載，改動靠 restart 生效。
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
