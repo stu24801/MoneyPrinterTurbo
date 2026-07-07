@@ -219,6 +219,14 @@
     "Insert above": "上方插入",
     "(at end)": "（加在最後）",
     "Use segment transitions": "使用段落進場轉場",
-    "Use transitions help": "開啟時，各段依自己的「進場轉場」設定（淡入/黑場/滑入）銜接；關閉時全部用硬切，讓演繹連續不被轉場打斷。"
+    "Use transitions help": "開啟時，各段依自己的「進場轉場」設定（淡入/黑場/滑入）銜接；關閉時全部用硬切，讓演繹連續不被轉場打斷。",
+    "Drama voice engine": "角色配音引擎",
+    "Edge voice (free)": "Edge 語音（免費）",
+    "Google voice (natural)": "Google 語音（更自然、有語調）",
+    "Segment bridging": "段落銜接方式",
+    "Entrance transitions": "進場轉場",
+    "Crossfade dissolve": "溶接串場",
+    "Hard cut (continuous)": "硬切（連續）",
+    "Segment bridging help": "進場轉場=每段淡入/黑場等；溶接串場=前後段溶接過渡，銜接最自然；硬切=連續不打斷。"
   }
 }

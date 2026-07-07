@@ -218,6 +218,14 @@
     "Insert above": "Insert above",
     "(at end)": " (at end)",
     "Use segment transitions": "Use segment transitions",
-    "Use transitions help": "On: each segment uses its own entrance transition (fade/dip/slide). Off: hard cuts everywhere so the performance flows continuously without interruption."
+    "Use transitions help": "On: each segment uses its own entrance transition (fade/dip/slide). Off: hard cuts everywhere so the performance flows continuously without interruption.",
+    "Drama voice engine": "Drama voice engine",
+    "Edge voice (free)": "Edge voice (free)",
+    "Google voice (natural)": "Google voice (natural)",
+    "Segment bridging": "Segment bridging",
+    "Entrance transitions": "Entrance transitions",
+    "Crossfade dissolve": "Crossfade dissolve",
+    "Hard cut (continuous)": "Hard cut (continuous)",
+    "Segment bridging help": "Entrance transitions = fade/dip per segment; Crossfade = smooth dissolve between segments; Hard cut = continuous."
   }
 }

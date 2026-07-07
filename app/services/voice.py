@@ -72,6 +72,48 @@ def get_siliconflow_voices() -> list[str]:
     ]
 
 
+def get_google_voices() -> list[str]:
+    """Google Cloud TTS (Traditional Chinese) voices via the LLM proxy.
+    Format: "google:cmn-TW-Wavenet-A-Female"."""
+    voices = [
+        ("cmn-TW-Wavenet-A", "Female"), ("cmn-TW-Wavenet-B", "Male"),
+        ("cmn-TW-Wavenet-C", "Male"), ("cmn-TW-Standard-A", "Female"),
+        ("cmn-TW-Standard-B", "Male"), ("cmn-TW-Standard-C", "Male"),
+        ("cmn-CN-Wavenet-A", "Female"), ("cmn-CN-Wavenet-B", "Male"),
+        ("cmn-CN-Wavenet-C", "Male"), ("cmn-CN-Wavenet-D", "Female"),
+    ]
+    return [f"google:{v}-{g}" for v, g in voices]
+
+
+def is_google_voice(voice_name: str) -> bool:
+    return str(voice_name).startswith("google:")
+
+
+def google_tts(text: str, voice: str, rate: float = 1.0, pitch: float = 0.0,
+               voice_file: str = "") -> bool:
+    """Synthesize with Google Cloud TTS through the LLM proxy /v1/audio/speech.
+    voice like 'google:cmn-TW-Wavenet-A-Female' or bare 'cmn-TW-Wavenet-A'."""
+    import base64
+    base_url = config.app.get("openai_base_url", "").rstrip("/")
+    api_key = config.app.get("openai_api_key", "")
+    v = voice.replace("google:", "").replace("-Female", "").replace("-Male", "").strip()
+    try:
+        r = requests.post(f"{base_url}/audio/speech",
+                          headers={"Authorization": f"Bearer {api_key}"},
+                          json={"text": text, "voice": v, "rate": rate, "pitch": pitch},
+                          timeout=60)
+        r.raise_for_status()
+        b64 = r.json().get("audio_b64", "")
+        if not b64:
+            return False
+        with open(voice_file, "wb") as f:
+            f.write(base64.b64decode(b64))
+        return os.path.exists(voice_file) and os.path.getsize(voice_file) > 0
+    except Exception as e:
+        logger.error(f"google_tts failed ({v}): {e}")
+        return False
+
+
 def get_gemini_voices() -> list[str]:
     """
     获取Gemini TTS的声音列表
@@ -1125,16 +1167,28 @@ _TW_VOICES = {
     "female": ["zh-TW-HsiaoChenNeural", "zh-TW-HsiaoYuNeural"],
     "male": ["zh-TW-YunJheNeural"],
 }
+# Google Cloud TTS 語音池（更自然，透過 proxy）
+_GOOGLE_VOICES = {
+    "female": ["google:cmn-TW-Wavenet-A", "google:cmn-CN-Wavenet-A", "google:cmn-CN-Wavenet-D"],
+    "male": ["google:cmn-TW-Wavenet-B", "google:cmn-TW-Wavenet-C", "google:cmn-CN-Wavenet-B"],
+}
 _EMOTION_RATE = {
     "平靜": 0.0, "開心": 0.10, "激動": 0.18, "悲傷": -0.15,
     "嚴肅": -0.05, "溫柔": -0.08, "疑惑": -0.05, "緊張": 0.15,
     "豪爽": 0.08, "驚訝": 0.12, "生氣": 0.15, "無奈": -0.10,
 }
+# 情感 → 音調偏移（Hz），edge-tts 支援 pitch，讓語調更有起伏
+_EMOTION_PITCH = {
+    "平靜": 0, "開心": 25, "激動": 40, "悲傷": -30,
+    "嚴肅": -15, "溫柔": 10, "疑惑": 15, "緊張": 30,
+    "豪爽": 20, "驚訝": 45, "生氣": 20, "無奈": -20,
+}
 
 
-def assign_character_voices(characters: list) -> dict:
-    """Map character name -> edge voice, cycling the pool per gender so each
-    character keeps a distinct, consistent voice."""
+def assign_character_voices(characters: list, engine: str = "edge") -> dict:
+    """Map character name -> voice, cycling the per-gender pool so each character
+    keeps a distinct, consistent voice. engine: 'edge' (免費) or 'google' (更自然)."""
+    voices = _GOOGLE_VOICES if engine == "google" else _TW_VOICES
     mapping = {}
     counters = {"female": 0, "male": 0}
     for c in characters or []:
@@ -1142,7 +1196,7 @@ def assign_character_voices(characters: list) -> dict:
         if not name:
             continue
         gender = "male" if str(c.get("gender", "")).lower().startswith("m") else "female"
-        pool = _TW_VOICES.get(gender) or _TW_VOICES["female"]
+        pool = voices.get(gender) or voices["female"]
         mapping[name] = pool[counters[gender] % len(pool)]
         counters[gender] += 1
     return mapping
@@ -1150,6 +1204,48 @@ def assign_character_voices(characters: list) -> dict:
 
 def emotion_to_rate(emotion: str) -> float:
     return _EMOTION_RATE.get((emotion or "").strip(), 0.0)
+
+
+def emotion_to_pitch(emotion: str) -> int:
+    """Pitch offset in Hz for an emotion (for edge-tts pitch=±NHz)."""
+    return _EMOTION_PITCH.get((emotion or "").strip(), 0)
+
+
+async def _edge_tts_pitch(text, voice, rate_pct, pitch_hz, out_file):
+    """Direct edge-tts call with rate + pitch (for character emotion)."""
+    rate_str = f"{'+' if rate_pct >= 0 else '-'}{abs(int(rate_pct)):d}%"
+    pitch_str = f"{'+' if pitch_hz >= 0 else '-'}{abs(int(pitch_hz)):d}Hz"
+    try:
+        communicate = edge_tts.Communicate(text, voice, rate=rate_str, pitch=pitch_str,
+                                            boundary="WordBoundary")
+    except TypeError:
+        communicate = edge_tts.Communicate(text, voice, rate=rate_str, pitch=pitch_str)
+    with open(out_file, "wb") as f:
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                f.write(chunk["data"])
+    return os.path.exists(out_file) and os.path.getsize(out_file) > 0
+
+
+def tts_emotion(text, voice_name, emotion, out_file):
+    """Character-line TTS with emotion-driven rate AND pitch/tone. Routes to
+    Google Cloud TTS for 'google:' voices, else edge-tts. Returns bool."""
+    # Google Cloud TTS voice
+    if is_google_voice(voice_name):
+        g_rate = 1.0 + emotion_to_rate(emotion)          # ~0.85–1.2
+        g_pitch = emotion_to_pitch(emotion) / 8.0        # Hz→~semitones, ~±5.6
+        return google_tts(text, voice_name, rate=g_rate, pitch=g_pitch, voice_file=out_file)
+    # edge-tts voice
+    voice_name = parse_voice_name(voice_name)
+    rate_pct = int(emotion_to_rate(emotion) * 100)
+    pitch_hz = emotion_to_pitch(emotion)
+    for _ in range(3):
+        try:
+            if asyncio.run(_edge_tts_pitch(text, voice_name, rate_pct, pitch_hz, out_file)):
+                return True
+        except Exception as e:
+            logger.warning(f"tts_emotion failed ({voice_name}, {emotion}): {e}")
+    return False
 
 
 def parse_dialogue_lines(dialogue_text: str) -> list:
@@ -1207,6 +1303,10 @@ def tts(
     voice_file: str,
     voice_volume: float = 1.0,
 ) -> Union[SubMaker, None]:
+    if is_google_voice(voice_name):
+        # Google Cloud TTS via proxy; no word-boundary SubMaker → subtitle uses whisper fallback
+        ok = google_tts(text, voice_name, rate=voice_rate or 1.0, voice_file=voice_file)
+        return SubMaker() if ok else None
     if is_azure_v2_voice(voice_name):
         return azure_tts_v2(text, voice_name, voice_file)
     elif is_siliconflow_voice(voice_name):

@@ -588,20 +588,32 @@ def merge_segment_videos(segment_files: List[str], output_file: str, params,
     connecting instruction. Background music is mixed over the result."""
     clips = [VideoFileClip(f) for f in segment_files]
     transitions = transitions or []
-    for i in range(len(clips)):
-        fx = transitions[i] if i < len(transitions) else "none"
-        try:
-            if fx == "fade_in":
-                clips[i] = video_effects.fadein_transition(clips[i], 1.0)
-            elif fx == "fade" and i > 0:
-                # dip to black: previous clip fades out, this one fades in
-                clips[i - 1] = video_effects.fadeout_transition(clips[i - 1], 0.8)
-                clips[i] = video_effects.fadein_transition(clips[i], 0.8)
-            elif fx == "slide_in" and i > 0:
-                clips[i] = video_effects.slidein_transition(clips[i], 1.0, "left")
-        except Exception as e:
-            logger.warning(f"transition '{fx}' on segment {i + 1} failed: {e}")
-    merged = concatenate_videoclips(clips)
+    crossfade = float(getattr(params, "crossfade", 0) or 0)
+
+    if crossfade > 0 and len(clips) > 1:
+        # 溶接串場：每段溶入下一段（overlap dissolve），像專業串場
+        from moviepy import vfx as _vfx
+        cf = min(crossfade, 1.2)
+        comp = [clips[0]]
+        for i in range(1, len(clips)):
+            comp.append(clips[i].with_effects([_vfx.CrossFadeIn(cf)]))
+        merged = concatenate_videoclips(comp, method="compose", padding=-cf)
+        logger.info(f"merged with crossfade dissolve {cf}s between {len(clips)} segments")
+    else:
+        for i in range(len(clips)):
+            fx = transitions[i] if i < len(transitions) else "none"
+            try:
+                if fx == "fade_in":
+                    clips[i] = video_effects.fadein_transition(clips[i], 1.0)
+                elif fx == "fade" and i > 0:
+                    # dip to black: previous clip fades out, this one fades in
+                    clips[i - 1] = video_effects.fadeout_transition(clips[i - 1], 0.8)
+                    clips[i] = video_effects.fadein_transition(clips[i], 0.8)
+                elif fx == "slide_in" and i > 0:
+                    clips[i] = video_effects.slidein_transition(clips[i], 1.0, "left")
+            except Exception as e:
+                logger.warning(f"transition '{fx}' on segment {i + 1} failed: {e}")
+        merged = concatenate_videoclips(clips)
     audio_clip = merged.audio
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
     if bgm_file and audio_clip is not None:

@@ -692,14 +692,16 @@ with middle_panel:
 
         # 添加TTS服务器选择下拉框
         tts_servers = [
-            ("azure-tts-v1", "Azure TTS V1"),
+            ("azure-tts-v1", "Azure TTS V1（edge 免費）"),
+            ("google-tts", "Google Cloud TTS（透過 Proxy）"),
             ("azure-tts-v2", "Azure TTS V2"),
             ("siliconflow", "SiliconFlow TTS"),
             ("gemini-tts", "Google Gemini TTS"),
         ]
-        # 只顯示已設定 API key 的伺服器（未設 key 的選了必失敗）
+        # 只顯示可用的伺服器（未設 key 的選了必失敗）
         _tts_available = {
             "azure-tts-v1": True,  # edge 免費，不需 key
+            "google-tts": True,    # 走 proxy 的 Vertex 服務帳號，不需額外 key
             "azure-tts-v2": bool(config.azure.get("speech_key", "")),
             "siliconflow": bool(config.siliconflow.get("api_key", "")),
             "gemini-tts": bool(config.app.get("gemini_api_key", "")),
@@ -730,6 +732,8 @@ with middle_panel:
         if selected_tts_server == "siliconflow":
             # 获取硅基流动的声音列表
             filtered_voices = voice.get_siliconflow_voices()
+        elif selected_tts_server == "google-tts":
+            filtered_voices = voice.get_google_voices()
         elif selected_tts_server == "gemini-tts":
             # 获取Gemini TTS的声音列表
             filtered_voices = voice.get_gemini_voices()
@@ -1419,14 +1423,13 @@ if _sb:
         _render_job_panel(_sb_tid, _batch)
         _sb = None  # 略過下方編輯 UI，避免與背景執行緒搶存檔
     elif _batch and _batch.get("status") in ("done", "error"):
-        st.divider()
         if _batch["status"] == "error":
-            st.error("❌ " + tr("Production failed") + "：" + str(_batch.get("error", "")))
+            # 中斷/失敗：清掉任務並溫和提示一次，直接進入正常編輯（不擋界面）
             jobs.clear(_sb_tid, _batch_key)
-            if st.button(tr("Refresh progress"), key="job_err_ack"):
-                st.rerun()
-            _sb = None
+            st.warning("⚠️ " + str(_batch.get("error", tr("Production failed"))))
+            # 不設 _sb=None，讓下方正常渲染，使用者可直接重新產製/合併
         elif _batch.get("kind") == "merge":
+            st.divider()
             st.subheader("🎬 " + tr("Video Generation Completed"))
             for v in (_batch.get("result", {}) or {}).get("videos", []):
                 if os.path.exists(v):
@@ -1529,9 +1532,19 @@ if _sb:
                     if _nn != _ch.get("name") or _gg != _ch.get("gender") or _dd != _ch.get("desc"):
                         _ch["name"], _ch["gender"], _ch["desc"] = _nn, _gg, _dd
                         _cast_changed = True
-                _vm_preview = voice.assign_character_voices(_sb_chars)
+                # 角色配音引擎：edge（免費）或 google（更自然、有語調）
+                _eng_opts = ["edge", "google"]
+                _saved_eng = config.ui.get("drama_voice_engine", "edge")
+                _dve = st.selectbox(
+                    "🔊 " + tr("Drama voice engine"), _eng_opts,
+                    index=_eng_opts.index(_saved_eng) if _saved_eng in _eng_opts else 0,
+                    format_func=lambda x: tr("Edge voice (free)") if x == "edge" else tr("Google voice (natural)"),
+                    key=f"dve_{_sb_tid}")
+                config.ui["drama_voice_engine"] = _dve
+                _vm_preview = voice.assign_character_voices(_sb_chars, engine=_dve)
                 st.caption("🔈 " + tr("Voice assignment") + "：" +
-                           "　".join(f"{k}→{v.split('-')[-1].replace('Neural','')}" for k, v in _vm_preview.items()))
+                           "　".join(f"{k}→{v.split(':')[-1].split('-')[-1].replace('Neural','')}"
+                                     for k, v in _vm_preview.items()))
                 if _cast_changed:
                     _save_storyboard_data(_sb_tid, _sb_style, _segments, characters=_sb_chars)
 
@@ -1820,7 +1833,7 @@ if _sb:
                 _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="segments")
                 st.rerun()
             else:
-                _vm = voice.assign_character_voices(_sb_chars)
+                _vm = voice.assign_character_voices(_sb_chars, engine=config.ui.get("drama_voice_engine","edge"))
                 _copied_params = params
                 jobs.submit(_sb_tid, "batch", "segments",
                             (lambda si=_seg_inputs, vm=_vm, am=_auto_motion:
@@ -1852,7 +1865,7 @@ if _sb:
                 st.caption(seg.get("dialogue_text") or seg.get("script_chunk", ""))
                 if st.button("🔁 " + tr("Re-render Segment"), key=f"reseg_{_sb_tid}_{seg.get('uid', i)}",
                              use_container_width=True):
-                    _vm = voice.assign_character_voices(_sb_chars)
+                    _vm = voice.assign_character_voices(_sb_chars, engine=config.ui.get("drama_voice_engine","edge"))
                     _one = [{"clip": seg.get("clip"), "image": seg.get("image"),
                              "script_chunk": seg.get("script_chunk"),
                              "dialogue_text": seg.get("dialogue_text", ""), "index": i}]
@@ -1861,10 +1874,17 @@ if _sb:
                                     _sb_tid, params, vm, si)), total=1)
                     st.rerun()
 
-        # 是否使用段落進場轉場（關閉＝連續演繹，不被轉場打斷）
-        _use_fx = st.checkbox("🎞 " + tr("Use segment transitions"),
-                              value=st.session_state.get(f"usefx_{_sb_tid}", True),
-                              key=f"usefx_{_sb_tid}", help=tr("Use transitions help"))
+        # 段落間演繹銜接方式
+        _bridge_opts = ["transitions", "crossfade", "none"]
+        _bridge = st.radio(
+            "🎬 " + tr("Segment bridging"), _bridge_opts, horizontal=True,
+            index=_bridge_opts.index(st.session_state.get(f"bridge_{_sb_tid}", "transitions")),
+            format_func=lambda x: {"transitions": tr("Entrance transitions"),
+                                   "crossfade": tr("Crossfade dissolve"),
+                                   "none": tr("Hard cut (continuous)")}.get(x, x),
+            key=f"bridge_{_sb_tid}", help=tr("Segment bridging help"))
+        _use_fx = _bridge == "transitions"
+        _cf = 0.6 if _bridge == "crossfade" else 0.0
         c_merge, c_back, c_save2, c_drop = st.columns(4)
         if c_save2.button("💾 " + tr("Save & continue later"), use_container_width=True):
             _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="segments")
@@ -1872,8 +1892,9 @@ if _sb:
             st.toast("💾 " + tr("Progress saved"))
             st.rerun()
         if c_merge.button("✅ " + tr("Confirm & Merge"), use_container_width=True, type="primary"):
+            params.crossfade = _cf
             jobs.submit(_sb_tid, "merge", "merge",
-                        (lambda uf=_use_fx: tm.job_merge(_sb_tid, params, use_transitions=uf)),
+                        (lambda uf=_use_fx, cf=_cf: tm.job_merge(_sb_tid, params, use_transitions=uf)),
                         total=1)
             st.rerun()
         if c_back.button("⬅ " + tr("Back to Storyboard"), use_container_width=True):

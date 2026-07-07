@@ -52,6 +52,23 @@ def _aspect_value(params):
     return a.value if hasattr(a, "value") else a
 
 
+def drama_video_prompt(seg):
+    """Build a Veo prompt that makes the character PERFORM the dialogue (mouth
+    moving, expression & gesture matching the lines and emotion), so the acting
+    matches the spoken dialogue instead of being a mute scene."""
+    base = (seg.get("video_prompt") or seg.get("scene") or "").strip()
+    dialogue = (seg.get("dialogue_text") or "").strip()
+    if not dialogue:
+        return base or "cinematic scene"
+    lines = voice.parse_dialogue_lines(dialogue)
+    perf = "；".join(
+        f"{ln['speaker']}（{ln['emotion']}）說：「{ln['line']}」" if ln.get("speaker")
+        else ln["line"] for ln in lines if ln.get("line"))
+    scene = (base + "。") if base else ""
+    return (f"{scene}角色對嘴說出以下台詞並以對應情緒表演（嘴型、表情、肢體動作要吻合說話內容）："
+            f"{perf}")
+
+
 # ── Background job orchestration (run inside jobs.submit threads) ──────────────
 def job_generate_image(task_id, uid, prompt, aspect_value, style, appearance, ref_images):
     """Generate one segment's storyboard image and persist it by uid."""
@@ -147,7 +164,11 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
             image = s.get("image") or ""
             if (not clip or not os.path.exists(clip)) and image and os.path.exists(image):
                 jobs.update_progress(task_id, "batch", pos, total, f"segment {idx + 1} · motion")
-                vdir = s.get("video_prompt") or s.get("dialogue_text") or s.get("script_chunk") or ""
+                # 戲劇模式：把台詞帶入 Veo prompt，讓角色演出對應台詞（對嘴/表情/動作）
+                if (s.get("dialogue_text") or "").strip():
+                    vdir = drama_video_prompt(s)
+                else:
+                    vdir = s.get("video_prompt") or s.get("script_chunk") or ""
                 _seg_dur = int(s.get("duration") or params.video_clip_duration or 6)
                 vid = material.generate_single_video_llm(
                     task_id, vdir, VideoAspect(_aspect_value(params)),
@@ -674,10 +695,10 @@ def synthesize_drama_segment(task_dir, idx, dialogue_text, voice_map, subtitle_e
         if not text:
             continue
         vname = voice_map.get(spk, default_voice)
-        rate = voice.emotion_to_rate(emo)
         part_f = path.join(task_dir, f"seg-{idx}-line-{li}.mp3")
-        sm = voice.tts(text=text, voice_name=vname, voice_rate=rate, voice_file=part_f)
-        if sm is None or not path.exists(part_f):
+        # 依情感套用語速 + 音調（讓台詞有語調起伏）
+        ok = voice.tts_emotion(text=text, voice_name=vname, emotion=emo, out_file=part_f)
+        if not ok or not path.exists(part_f):
             logger.warning(f"segment {idx + 1} line {li + 1}: tts failed ({spk})")
             continue
         seg_audio = AudioSegment.from_file(part_f)

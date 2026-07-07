@@ -77,6 +77,7 @@ class VideoParams(BaseModel):
     video_clip_duration: Optional[int] = 5
     video_total_duration: Optional[int] = 0  # 預計影片總長度(秒)，0=自動
     presentation_mode: Optional[str] = "narration"  # narration=旁白解說 | drama=角色展演
+    crossfade: Optional[float] = 0.0  # 段落間溶接串場秒數，0=不用
     video_count: Optional[int] = 1
 
     video_source: Optional[str] = "pexels"
