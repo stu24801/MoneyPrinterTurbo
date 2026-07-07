@@ -405,12 +405,14 @@ def generate_video(
         interline = int(params.font_size * 0.25)
         size=(int(max_width), int(txt_height + params.font_size * 0.25 + (interline * (wrapped_txt.count("\n") + 1))))
 
+        _bg = params.text_background_color
+        _bg = None if (not _bg or _bg == "transparent") else _bg
         _clip = TextClip(
             text=wrapped_txt,
             font=font_path,
             font_size=params.font_size,
             color=params.text_fore_color,
-            bg_color=params.text_background_color,
+            bg_color=_bg,
             stroke_color=params.stroke_color,
             stroke_width=params.stroke_width,
             # interline=interline,
@@ -575,8 +577,12 @@ def compose_segment_video(clip_path, audio_path, subtitle_path, output_file, par
             for (ts, te), phrase in sub.subtitles:
                 mw = video_width * 0.9
                 wrapped, th = wrap_text(phrase, max_width=mw, font=font_path, fontsize=params.font_size)
+                # moviepy 2.x TextClip 的 bg_color 不接受 'transparent'（PIL 顏色），
+                # 空值/transparent 一律轉 None（透明底），否則字幕整段拋錯不顯示
+                _bg = params.text_background_color
+                _bg = None if (not _bg or _bg == "transparent") else _bg
                 tc = TextClip(text=wrapped, font=font_path, font_size=int(params.font_size),
-                              color=params.text_fore_color, bg_color=params.text_background_color,
+                              color=params.text_fore_color, bg_color=_bg,
                               stroke_color=params.stroke_color, stroke_width=int(params.stroke_width))
                 tc = tc.with_start(ts).with_end(te).with_duration(te - ts)
                 if params.subtitle_position == "top":
