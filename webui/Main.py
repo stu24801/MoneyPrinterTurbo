@@ -28,6 +28,7 @@ from app.models.schema import (
 )
 from app.services import llm, material, video, voice
 from app.services import task as tm
+from app.services import jobs
 from app.utils import utils
 
 st.set_page_config(
@@ -1370,7 +1371,63 @@ if storyboard_button:
                           drama=result.get("drama"))
     st.session_state["storyboard"] = {"task_id": task_id, "stage": "board"}
 
+def _render_job_panel(task_id, job):
+    """Show progress for a background job; user can leave & switch projects."""
+    st.divider()
+    st.subheader("📋 " + tr("Storyboard Review"))
+    kind = job.get("kind", "")
+    _kind_label = {"image": tr("Generating image"), "clip": tr("Generating Segment Clip"),
+                   "segments": tr("Rendering Segments"), "merge": tr("Merging Segments")}.get(kind, kind)
+    done = job.get("progress_done", 0)
+    total = job.get("progress_total", 0) or 0
+    st.info("⏳ **" + tr("Producing in background") + "**　" + _kind_label +
+            (f"（{done}/{total}）" if total else ""))
+    if total:
+        st.progress(min(1.0, done / total))
+    st.caption("💡 " + tr("Background hint"))
+    c1, c2 = st.columns(2)
+    if c1.button("🔄 " + tr("Refresh progress"), use_container_width=True, key="job_refresh"):
+        st.rerun()
+    if c2.button("↩️ " + tr("Leave to other projects"), use_container_width=True, key="job_leave"):
+        st.session_state.pop("storyboard", None)
+        st.rerun()
+
+
 _sb = st.session_state.get("storyboard")
+if _sb:
+    _sb_tid = _sb["task_id"]
+    _sb_dir = utils.task_dir(_sb_tid)
+    _job = jobs.read_status(_sb_tid)
+
+    # 背景任務進行中 → 只顯示進度面板，可切換其他專案（下方專案專區照常）
+    if _job and _job.get("status") == "running" and jobs.is_running(_sb_tid):
+        _render_job_panel(_sb_tid, _job)
+        _sb = None  # 略過下方編輯 UI，避免與背景執行緒搶存檔
+    elif _job and _job.get("status") in ("done", "error"):
+        st.divider()
+        if _job["status"] == "error":
+            st.error("❌ " + tr("Production failed") + "：" + str(_job.get("error", "")))
+            jobs.clear(_sb_tid)
+            if st.button(tr("Refresh progress"), key="job_err_ack"):
+                st.rerun()
+            _sb = None
+        elif _job.get("kind") == "merge":
+            # 合併完成 → 顯示最終影片
+            st.subheader("🎬 " + tr("Video Generation Completed"))
+            for v in (_job.get("result", {}) or {}).get("videos", []):
+                if os.path.exists(v):
+                    st.video(v)
+            jobs.clear(_sb_tid)
+            if st.button("↩️ " + tr("Leave to other projects"), key="merge_done_leave",
+                         use_container_width=True):
+                st.session_state.pop("storyboard", None)
+                st.rerun()
+            _sb = None
+        else:
+            st.success("✅ " + tr("Production done"))
+            jobs.clear(_sb_tid)
+            st.rerun()
+
 if _sb:
     st.divider()
     st.subheader("📋 " + tr("Storyboard Review"))
@@ -1516,20 +1573,12 @@ if _sb:
                     else:
                         _rdesc = (seg.get("ref_desc") or "").strip()
                         _vp_full = _vp + (f"。{tr('Also include')}：{_rdesc}" if _rdesc else "")
-                        with st.spinner(tr("Generating Segment Clip Wait")):
-                            _vid = material.generate_single_video_llm(
-                                _sb_tid, _vp_full, params.video_aspect,
-                                max_clip_duration=params.video_clip_duration, index=_uid,
-                                style=_sb_style,
-                                reference_image=_seg_img if _has_img else "",
-                            )
-                        if _vid:
-                            seg["clip"] = _vid
-                            seg["video_prompt"] = _vp
-                            _save_storyboard_data(_sb_tid, _sb_style, _segments)
-                            st.rerun()
-                        else:
-                            st.error(tr("Video Generation Failed"))
+                        _av = params.video_aspect.value
+                        _refimg = _seg_img if _has_img else ""
+                        jobs.submit(_sb_tid, "clip", (lambda uid=_uid, p=_vp_full, av=_av,
+                                    md=params.video_clip_duration, ri=_refimg:
+                                    tm.job_generate_clip(_sb_tid, uid, p, av, md, _sb_style, ri)))
+                        st.rerun()
                 # 單段產生/重新產生分鏡圖
                 _img_btn_label = ("🔄 " + tr("Regenerate Image")) if seg.get("image") \
                     else ("🖼 " + tr("Generate Storyboard Image"))
@@ -1539,34 +1588,20 @@ if _sb:
                         _new_prompt = st.session_state.get(f"sb_{_sb_tid}_{_uid}_prompt", seg.get("prompt", ""))
                         if not (_new_prompt or "").strip():
                             _new_prompt = seg.get("video_prompt", "") or seg.get("script_chunk", "")
-                        # 角色一致性用「外型文字描述」維持（快速生成，可靠）；
-                        # 參考圖只用於使用者上傳的元素（明確 opt-in，才走較慢的 edits）。
-                        _refs, _appear = [], ""
+                        # 角色一致性用外型文字（快速）；參考圖只給使用者上傳的元素
+                        _appear = ""
                         if _is_drama and _sb_chars:
                             _, _appear = _segment_character_refs(seg, _sb_chars)
                         _refs = [p for p in seg.get("ref_uploads", []) if os.path.exists(p)]
                         _rdesc = (seg.get("ref_desc") or "").strip()
                         _img_prompt = _new_prompt + (f"。{tr('Also include')}：{_rdesc}" if _rdesc else "")
-                        with st.spinner(tr("Regenerating Image")):
-                            _img = material.generate_single_image_llm(
-                                _sb_tid, _img_prompt, params.video_aspect, index=_uid,
-                                style=_sb_style, reference_images=_refs, appearance=_appear,
-                            )
-                            if _img:
-                                seg["image"] = _img
-                                _old_clip = seg.get("clip", "")
-                                if _old_clip and os.path.exists(_old_clip):
-                                    try:
-                                        os.remove(_old_clip)  # stale zoom clip
-                                    except OSError:
-                                        pass
-                                seg["clip"] = ""  # re-rendered at segment phase
-                        if _img:
-                            seg["prompt"] = _new_prompt
-                            _save_storyboard_data(_sb_tid, _sb_style, _segments)
-                            st.rerun()
-                        else:
-                            st.error(tr("Video Generation Failed"))
+                        seg["prompt"] = _new_prompt
+                        _save_storyboard_data(_sb_tid, _sb_style, _segments)
+                        _av = params.video_aspect.value
+                        jobs.submit(_sb_tid, "image", (lambda uid=_uid, p=_img_prompt, av=_av,
+                                    ap=_appear, rf=_refs: tm.job_generate_image(
+                                        _sb_tid, uid, p, av, _sb_style, ap, rf)))
+                        st.rerun()
             with c_text:
                 seg["prompt"] = st.text_input(
                     tr("Image Prompt"), value=seg.get("prompt", ""),
@@ -1664,6 +1699,17 @@ if _sb:
 
         st.info(tr("Storyboard Hint"))
 
+        # 分段影片動態化：沒有 Veo 影片的段落，用分鏡圖自動生成動態影片（有戲劇感，較貴/久）
+        _img_only = sum(1 for s in _segments
+                        if not (s.get("clip") and os.path.exists(s.get("clip", "")))
+                        and s.get("image") and os.path.exists(s.get("image", "")))
+        _auto_motion = st.checkbox(
+            "🎬 " + tr("Auto motion for image-only segments") +
+            (f"（{_img_only}）" if _img_only else ""),
+            value=st.session_state.get(f"automotion_{_sb_tid}", False),
+            key=f"automotion_{_sb_tid}",
+            help=tr("Auto motion help"))
+
         c_ok, c_save, c_discard = st.columns(3)
         if c_save.button("💾 " + tr("Save & continue later"), use_container_width=True):
             _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="board")
@@ -1683,7 +1729,12 @@ if _sb:
             _seg_inputs, _reused = [], 0
             for i, s in enumerate(_segments):
                 _sv = s.get("segment_video", "")
-                if _sv and os.path.exists(_sv) and s.get("rendered_sig") == _seg_sig(s):
+                _has_clip = bool(s.get("clip")) and os.path.exists(s.get("clip", ""))
+                # 啟用自動動態化時，只有靜態圖(無 Veo clip)的段落要強制重製成動態
+                _force_motion = _auto_motion and not _has_clip and \
+                    bool(s.get("image")) and os.path.exists(s.get("image", ""))
+                if _sv and os.path.exists(_sv) and s.get("rendered_sig") == _seg_sig(s) \
+                        and not _force_motion:
                     _reused += 1
                     continue  # 未修改且已渲染 → 直接沿用
                 _seg_inputs.append({"clip": s.get("clip"), "image": s.get("image"),
@@ -1691,26 +1742,20 @@ if _sb:
                                     "dialogue_text": s.get("dialogue_text", ""), "index": i})
             if _reused:
                 st.toast(f"♻️ {_reused} / {len(_segments)} " + tr("segments reused"))
-            _outs_by_idx = {}
-            if _seg_inputs:
-                with st.spinner(tr("Rendering Segments")):
-                    _outs = tm.generate_segments(_sb_tid, params, _seg_inputs,
-                                                 voice_map=voice.assign_character_voices(_sb_chars))
-                _outs_by_idx = {inp["index"]: _outs[j] if j < len(_outs) else ""
-                                for j, inp in enumerate(_seg_inputs)}
-            for i, seg in enumerate(_segments):
-                if i in _outs_by_idx:
-                    seg["segment_video"] = _outs_by_idx[i]
-                    if _outs_by_idx[i]:
-                        seg["rendered_sig"] = _seg_sig(seg)
             _save_storyboard_data(_sb_tid, _sb_style, _segments)
-            _ok_count = sum(1 for s in _segments
-                            if s.get("segment_video") and os.path.exists(s["segment_video"]))
-            if not _ok_count:
-                st.error(tr("Video Generation Failed"))
-            else:
+            if not _seg_inputs:
+                # 全部沿用 → 直接進檢視階段
                 st.session_state["storyboard"]["stage"] = "segments"
                 _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="segments")
+                st.rerun()
+            else:
+                _vm = voice.assign_character_voices(_sb_chars)
+                _copied_params = params
+                jobs.submit(_sb_tid, "segments",
+                            (lambda si=_seg_inputs, vm=_vm, am=_auto_motion:
+                                tm.job_render_segments(_sb_tid, _copied_params, vm, si,
+                                                       auto_motion=am)),
+                            total=len(_seg_inputs))
                 st.rerun()
         if c_discard.button("🗑 " + tr("Discard Storyboard"), use_container_width=True):
             del st.session_state["storyboard"]
@@ -1736,19 +1781,14 @@ if _sb:
                 st.caption(seg.get("dialogue_text") or seg.get("script_chunk", ""))
                 if st.button("🔁 " + tr("Re-render Segment"), key=f"reseg_{_sb_tid}_{seg.get('uid', i)}",
                              use_container_width=True):
-                    with st.spinner(tr("Rendering Segments")):
-                        _outs = tm.generate_segments(_sb_tid, params,
-                            voice_map=voice.assign_character_voices(_sb_chars), segments=[
-                            {"clip": seg.get("clip"), "image": seg.get("image"),
+                    _vm = voice.assign_character_voices(_sb_chars)
+                    _one = [{"clip": seg.get("clip"), "image": seg.get("image"),
                              "script_chunk": seg.get("script_chunk"),
-                             "dialogue_text": seg.get("dialogue_text", ""), "index": i}])
-                    if _outs and _outs[0]:
-                        seg["segment_video"] = _outs[0]
-                        seg["rendered_sig"] = _seg_sig(seg)
-                        _save_storyboard_data(_sb_tid, _sb_style, _segments)
-                        st.rerun()
-                    else:
-                        st.error(tr("Video Generation Failed"))
+                             "dialogue_text": seg.get("dialogue_text", ""), "index": i}]
+                    jobs.submit(_sb_tid, "segments",
+                                (lambda si=_one, vm=_vm: tm.job_render_segments(
+                                    _sb_tid, params, vm, si)), total=1)
+                    st.rerun()
 
         c_merge, c_back, c_save2, c_drop = st.columns(4)
         if c_save2.button("💾 " + tr("Save & continue later"), use_container_width=True):
@@ -1757,17 +1797,9 @@ if _sb:
             st.toast("💾 " + tr("Progress saved"))
             st.rerun()
         if c_merge.button("✅ " + tr("Confirm & Merge"), use_container_width=True, type="primary"):
-            _seg_files = [s.get("segment_video") for s in _segments]
-            _seg_fx = [s.get("transition_effect", "none") for s in _segments]
-            with st.spinner(tr("Merging Segments")):
-                _fin = tm.merge_segments(_sb_tid, params, _seg_files, transitions=_seg_fx)
-            if not _fin or not _fin.get("videos"):
-                st.error(tr("Video Generation Failed"))
-            else:
-                st.success(tr("Video Generation Completed"))
-                for v in _fin["videos"]:
-                    st.video(v)
-                del st.session_state["storyboard"]
+            jobs.submit(_sb_tid, "merge",
+                        (lambda: tm.job_merge(_sb_tid, params)), total=1)
+            st.rerun()
         if c_back.button("⬅ " + tr("Back to Storyboard"), use_container_width=True):
             st.session_state["storyboard"]["stage"] = "board"
             _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="board")
@@ -1777,101 +1809,120 @@ if _sb:
             st.rerun()
 
 
-# ── 產製歷史區 ─────────────────────────────────────────────────────────────────
+# ── 專案專區 ───────────────────────────────────────────────────────────────────
+def _project_meta(tdir):
+    """Cheap metadata for the list (no media loading)."""
+    subject, script, terms = "", "", []
+    try:
+        with open(os.path.join(tdir, "script.json"), "r", encoding="utf-8") as f:
+            hd = json.loads(f.read())
+            subject = (hd.get("params", {}) or {}).get("video_subject", "")
+            script = hd.get("script", "") or ""
+            terms = hd.get("search_terms", []) or []
+    except Exception:
+        pass
+    return subject, script, terms
+
+
 st.divider()
-with st.expander("📁 " + tr("Generation History"), expanded=True):
-    _tasks_root = utils.storage_dir("tasks")
-    _entries = []
-    if os.path.isdir(_tasks_root):
-        for _tid in os.listdir(_tasks_root):
-            _tdir = os.path.join(_tasks_root, _tid)
-            if os.path.isdir(_tdir):
-                _entries.append((os.path.getmtime(_tdir), _tid, _tdir))
-    _entries.sort(reverse=True)
+_open_pid = st.session_state.get("_open_project")
+if _open_pid and not os.path.isdir(utils.task_dir(_open_pid)):
+    st.session_state.pop("_open_project", None)
+    _open_pid = None
 
-    if not _entries:
-        st.caption(tr("No history yet"))
-    for _mtime, _tid, _tdir in _entries[:12]:
-        import datetime as _dt
+if _open_pid:
+    # ── 專案詳情頁（獨立，只載入此專案）─────────────────────────────────────────
+    _pdir = utils.task_dir(_open_pid)
+    _subject, _h_script, _h_terms = _project_meta(_pdir)
+    _ptitle = _subject or (_h_script[:40] if _h_script else _open_pid[:8])
+    _pcol_a, _pcol_b = st.columns([4, 1])
+    _pcol_a.subheader("🎬 " + _ptitle)
+    if _pcol_b.button("⬅ " + tr("Back to projects"), use_container_width=True, key="proj_back"):
+        st.session_state.pop("_open_project", None)
+        st.rerun()
+    if jobs.is_running(_open_pid):
+        st.info("⏳ " + tr("Producing in background"))
+    if _h_script:
+        with st.expander("📄 " + tr("Video Script"), expanded=False):
+            st.write(_h_script)
 
-        _subject, _script_excerpt, _h_script, _h_terms = "", "", "", []
-        try:
-            with open(os.path.join(_tdir, "script.json"), "r", encoding="utf-8") as f:
-                _hd = json.loads(f.read())
-                _subject = (_hd.get("params", {}) or {}).get("video_subject", "")
-                _h_script = _hd.get("script", "") or ""
-                _h_terms = _hd.get("search_terms", []) or []
-                _script_excerpt = _h_script[:80]
-        except Exception:
-            pass
-        _finals = sorted(
-            f for f in os.listdir(_tdir) if f.startswith("final-") and f.endswith(".mp4")
-        )
-        _mat_files = sorted(
-            f for f in os.listdir(_tdir)
-            if f.startswith(("llm-image-", "llm-video-")) and not f.endswith(".png.mp4")
-        )
-        _when = _dt.datetime.fromtimestamp(_mtime).strftime("%Y-%m-%d %H:%M")
-        _title = _subject or _script_excerpt or _tid[:8]
-        st.markdown(f"**🎞️ {_title}**　`{_when}`" + ("" if _finals else f"　*({tr('Incomplete')})*"))
-        if _script_excerpt:
-            st.caption(_script_excerpt + ("…" if len(_script_excerpt) >= 80 else ""))
-        if _finals:
-            _fcols = st.columns(min(len(_finals), 2) + 1)
-            for _i, _f in enumerate(_finals[:2]):
-                _fcols[_i].video(os.path.join(_tdir, _f))
-        if _mat_files:
-            _mcols = st.columns(min(len(_mat_files), 5))
-            for _i, _mf in enumerate(_mat_files[:5]):
-                _mp = os.path.join(_tdir, _mf)
-                with _mcols[_i]:
+    _finals = sorted(f for f in os.listdir(_pdir)
+                     if f.startswith("final-") and f.endswith(".mp4"))
+    if _finals:
+        st.caption("🎬 " + tr("Video Generation Completed"))
+        for _f in _finals[:2]:
+            st.video(os.path.join(_pdir, _f))
+    _seg_vids = sorted((f for f in os.listdir(_pdir) if re.match(r"segment-\d+\.mp4$", f)),
+                       key=lambda x: int(re.search(r"\d+", x).group()))
+    if _seg_vids:
+        with st.expander("🎞️ " + tr("Segment Videos") + f"（{len(_seg_vids)}）", expanded=False):
+            for _sf in _seg_vids:
+                st.video(os.path.join(_pdir, _sf))
+    _mat_files = sorted(f for f in os.listdir(_pdir)
+                        if f.startswith(("llm-image-", "llm-video-")) and not f.endswith(".png.mp4"))
+    if _mat_files:
+        with st.expander("🖼 " + tr("Materials") + f"（{len(_mat_files)}）", expanded=False):
+            _mcols = st.columns(4)
+            for _i, _mf in enumerate(_mat_files):
+                with _mcols[_i % 4]:
+                    _mp = os.path.join(_pdir, _mf)
                     if _mf.endswith(".png"):
                         st.image(_mp, use_container_width=True)
-                    elif _mf.endswith(".mp4"):
+                    else:
                         st.video(_mp)
-        _seg_vids = sorted(
-            (f for f in os.listdir(_tdir) if re.match(r"segment-\d+\.mp4$", f)),
-            key=lambda x: int(re.search(r"\d+", x).group()),
-        )
-        if _seg_vids:
-            st.caption("🎞️ " + tr("Segment Videos") + f"（{len(_seg_vids)}）")
-            _scols = st.columns(min(len(_seg_vids), 4))
-            for _i, _sf in enumerate(_seg_vids[:4]):
-                _scols[_i].video(os.path.join(_tdir, _sf))
-            if len(_seg_vids) > 4:
-                st.caption(tr("Open storyboard to view all segments"))
-        _hb_load, _hb_sb, _hb_del = st.columns(3)
-        if _hb_load.button("↩️ " + tr("Load & Continue"), key=f"load_task_{_tid}",
-                           use_container_width=True):
-            st.session_state["_pending_load"] = {
-                "subject": _subject, "script": _h_script, "terms": _h_terms,
-            }
-            st.rerun()
 
-        _h_clips = sorted(
-            os.path.join(_tdir, f) for f in os.listdir(_tdir)
-            if f.endswith(".png.mp4") or (f.startswith("llm-video-") and f.endswith(".mp4"))
-        )
-        # Reopen whenever a storyboard exists (even text-only / image-only,
-        # e.g. saved at board stage), so editing can always be continued.
-        _has_sb = os.path.exists(os.path.join(_tdir, "storyboard.json"))
-        if _has_sb or _h_clips:
-            if _hb_sb.button("📋 " + tr("Reopen Storyboard"), key=f"sb_task_{_tid}",
-                             use_container_width=True):
-                st.session_state["_pending_load"] = {
-                    "subject": _subject, "script": _h_script, "terms": _h_terms,
-                }
-                st.session_state["storyboard"] = {"task_id": _tid, "materials": _h_clips,
-                                                  "stage": "auto"}
+    st.divider()
+    _h_clips = sorted(os.path.join(_pdir, f) for f in os.listdir(_pdir)
+                      if f.endswith(".png.mp4") or (f.startswith("llm-video-") and f.endswith(".mp4")))
+    _has_sb = os.path.exists(os.path.join(_pdir, "storyboard.json"))
+    _da, _db, _dc = st.columns(3)
+    if (_has_sb or _h_clips) and _da.button("📋 " + tr("Reopen Storyboard"),
+                                            key=f"sb_task_{_open_pid}", use_container_width=True):
+        st.session_state["_pending_load"] = {"subject": _subject, "script": _h_script, "terms": _h_terms}
+        st.session_state["storyboard"] = {"task_id": _open_pid, "materials": _h_clips, "stage": "auto"}
+        st.session_state.pop("_open_project", None)
+        st.rerun()
+    if _db.button("↩️ " + tr("Load & Continue"), key=f"load_task_{_open_pid}",
+                  use_container_width=True):
+        st.session_state["_pending_load"] = {"subject": _subject, "script": _h_script, "terms": _h_terms}
+        st.session_state.pop("_open_project", None)
+        st.rerun()
+    if _dc.button("🗑 " + tr("Delete Task"), key=f"del_task_{_open_pid}", use_container_width=True):
+        import shutil as _shutil
+        _shutil.rmtree(_pdir, ignore_errors=True)
+        st.session_state.pop("_open_project", None)
+        st.session_state.pop("storyboard", None)
+        st.rerun()
+else:
+    # ── 專案列表（精簡：每列一行，點「開啟」進詳情頁）───────────────────────────
+    with st.expander("📁 " + tr("Generation History"), expanded=True):
+        _tasks_root = utils.storage_dir("tasks")
+        _entries = []
+        if os.path.isdir(_tasks_root):
+            for _tid in os.listdir(_tasks_root):
+                _tdir = os.path.join(_tasks_root, _tid)
+                if os.path.isdir(_tdir):
+                    _entries.append((os.path.getmtime(_tdir), _tid, _tdir))
+        _entries.sort(reverse=True)
+        if not _entries:
+            st.caption(tr("No history yet"))
+        import datetime as _dt
+        for _mtime, _tid, _tdir in _entries[:30]:
+            _subject, _h_script, _ = _project_meta(_tdir)
+            _title = _subject or (_h_script[:30] if _h_script else _tid[:8])
+            _when = _dt.datetime.fromtimestamp(_mtime).strftime("%m-%d %H:%M")
+            _has_final = any(f.startswith("final-") and f.endswith(".mp4")
+                             for f in os.listdir(_tdir))
+            if jobs.is_running(_tid):
+                _status = "⏳"
+            elif _has_final:
+                _status = "✅"
+            else:
+                _status = "✏️"
+            _lc, _rc = st.columns([5, 1])
+            _lc.markdown(f"{_status} **{_title}**　`{_when}`")
+            if _rc.button(tr("Open project"), key=f"open_{_tid}", use_container_width=True):
+                st.session_state["_open_project"] = _tid
                 st.rerun()
-
-        if _hb_del.button("🗑 " + tr("Delete Task"), key=f"del_task_{_tid}",
-                          use_container_width=True):
-            import shutil as _shutil
-
-            _shutil.rmtree(_tdir, ignore_errors=True)
-            st.session_state.pop("storyboard", None)
-            st.rerun()
-        st.divider()
 
 config.save_config()

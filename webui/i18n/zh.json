@@ -198,6 +198,18 @@
     "Progress saved": "进度已保存，可从「生成历史」重开故事板继续编辑",
     "No reference yet": "尚未生成肖像",
     "Prepare refs hint": "可选：可生成角色肖像作为视觉参考；角色外型一致性已由外型文字自动维持，不生成肖像也可以。",
-    "Prepare character references": "生成角色肖像（可选）"
+    "Prepare character references": "生成角色肖像（可选）",
+    "Producing in background": "后台生成中",
+    "Background hint": "生成在后台进行，你可以切换到其他项目继续作业，稍后回到本项目查看进度或结果（不会因离开页面而中断）。",
+    "Refresh progress": "刷新进度",
+    "Leave to other projects": "先去其他项目",
+    "Generating image": "生成分镜图",
+    "Production failed": "生成失败",
+    "Production done": "生成完成",
+    "Auto motion for image-only segments": "分段视频自动动态化（用分镜图生成 Veo 动态，有戏剧感）",
+    "Auto motion help": "勾选后，只有静态分镜图的段落会用该段分镜图＋演出脚本自动生成 Veo 动态视频，成品有戏剧动态感（Veo 按秒计费、每段约 1-3 分钟，会在后台进行）。不勾选则静态图以缓慢放大呈现。",
+    "Open project": "打开",
+    "Back to projects": "返回项目列表",
+    "Materials": "素材"
   }
 }

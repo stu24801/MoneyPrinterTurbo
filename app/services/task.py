@@ -10,8 +10,143 @@ from app.config import config
 from app.models import const
 from app.models.schema import MaterialInfo, VideoConcatMode, VideoParams
 from app.services import llm, material, subtitle, video, voice
+from app.services import jobs
 from app.services import state as sm
 from app.utils import utils
+from app.models.schema import VideoAspect
+
+
+# ── storyboard.json raw I/O (self-contained for background job threads) ────────
+def _sb_path(task_id):
+    return path.join(utils.task_dir(task_id), "storyboard.json")
+
+
+def _load_sb(task_id):
+    try:
+        with open(_sb_path(task_id), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            data = {"style": "", "characters": [], "segments": data, "stage": "board"}
+        return data
+    except Exception:
+        return {"style": "", "characters": [], "segments": [], "stage": "board"}
+
+
+def _save_sb(task_id, data):
+    tmp = _sb_path(task_id) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _sb_path(task_id))
+
+
+def _seg_sig(s):
+    import hashlib
+    return hashlib.md5(
+        ((s.get("script_chunk") or "") + "|" + (s.get("dialogue_text") or "") + "|"
+         + (s.get("clip") or s.get("image") or "")).encode("utf-8")).hexdigest()[:12]
+
+
+# ── Background job orchestration (run inside jobs.submit threads) ──────────────
+def job_generate_image(task_id, uid, prompt, aspect_value, style, appearance, ref_images):
+    """Generate one segment's storyboard image and persist it by uid."""
+    aspect = VideoAspect(aspect_value)
+    img = material.generate_single_image_llm(
+        task_id, prompt, aspect, index=uid, style=style,
+        reference_images=ref_images or [], appearance=appearance or "")
+    if not img:
+        raise RuntimeError("image generation returned empty")
+    data = _load_sb(task_id)
+    for s in data.get("segments", []):
+        if s.get("uid") == uid:
+            s["image"] = img
+            old = s.get("clip", "")
+            if old and old.endswith(".png.mp4") and os.path.exists(old):
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
+                s["clip"] = ""
+            break
+    _save_sb(task_id, data)
+    return {"image": img, "uid": uid}
+
+
+def job_generate_clip(task_id, uid, prompt, aspect_value, max_dur, style, reference_image):
+    """Generate one segment's Veo clip (image-to-video if reference_image) by uid."""
+    aspect = VideoAspect(aspect_value)
+    vid = material.generate_single_video_llm(
+        task_id, prompt, aspect, max_clip_duration=max_dur, index=uid,
+        style=style, reference_image=reference_image or "")
+    if not vid:
+        raise RuntimeError("video generation returned empty")
+    data = _load_sb(task_id)
+    for s in data.get("segments", []):
+        if s.get("uid") == uid:
+            s["clip"] = vid
+            s["video_prompt"] = prompt
+            break
+    _save_sb(task_id, data)
+    return {"clip": vid, "uid": uid}
+
+
+def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
+                        auto_motion=False):
+    """Render the given segment inputs, updating segment_video by index and
+    setting stage=segments. When auto_motion is True, any segment that only has
+    a static image (no Veo clip) first gets a Veo image-to-video clip generated
+    from its storyboard image + video direction, so the result feels dramatic
+    rather than a static zoom."""
+    total = len(seg_inputs)
+    rendered = 0
+    style = _load_sb(task_id).get("style", "")
+    for pos, inp in enumerate(seg_inputs):
+        idx = int(inp.get("index", pos))
+        data = _load_sb(task_id)
+        segs = data.get("segments", [])
+        # Auto-motion: image-only segment → generate a Veo clip first
+        if auto_motion and 0 <= idx < len(segs):
+            s = segs[idx]
+            clip = s.get("clip") or ""
+            image = s.get("image") or ""
+            if (not clip or not os.path.exists(clip)) and image and os.path.exists(image):
+                jobs.update_progress(task_id, pos, total, f"segment {idx + 1} · motion")
+                vdir = s.get("video_prompt") or s.get("dialogue_text") or s.get("script_chunk") or ""
+                vid = material.generate_single_video_llm(
+                    task_id, vdir, VideoAspect(params.video_aspect.value),
+                    max_clip_duration=params.video_clip_duration, index=s.get("uid", idx),
+                    style=style, reference_image=image)
+                if vid:
+                    data = _load_sb(task_id)
+                    segs = data.get("segments", [])
+                    segs[idx]["clip"] = vid
+                    inp["clip"] = vid
+                    _save_sb(task_id, data)
+        outs = generate_segments(task_id, params, [inp], voice_map=voice_map)
+        out = outs[0] if outs else ""
+        data = _load_sb(task_id)
+        segs = data.get("segments", [])
+        if 0 <= idx < len(segs) and out:
+            segs[idx]["segment_video"] = out
+            segs[idx]["rendered_sig"] = _seg_sig(segs[idx])
+            rendered += 1
+            _save_sb(task_id, data)
+        jobs.update_progress(task_id, pos + 1, total, f"segment {idx + 1}")
+    data = _load_sb(task_id)
+    data["stage"] = "segments"
+    _save_sb(task_id, data)
+    return {"rendered": rendered, "total": total}
+
+
+def job_merge(task_id, params: VideoParams):
+    """Merge all rendered segment videos into the final film."""
+    data = _load_sb(task_id)
+    segs = data.get("segments", [])
+    files = [s.get("segment_video") for s in segs]
+    fx = [s.get("transition_effect", "none") for s in segs]
+    fin = merge_segments(task_id, params, files, transitions=fx)
+    if not fin or not fin.get("videos"):
+        raise RuntimeError("merge produced no video")
+    return {"videos": fin["videos"]}
 
 
 def generate_script(task_id, params):

@@ -197,6 +197,18 @@
     "Progress saved": "Progress saved — reopen from Generation History to continue",
     "No reference yet": "No portrait yet",
     "Prepare refs hint": "Optional: generate character portraits as a visual reference. Consistency is already kept via appearance text.",
-    "Prepare character references": "Generate character portraits (optional)"
+    "Prepare character references": "Generate character portraits (optional)",
+    "Producing in background": "Producing in background",
+    "Background hint": "Production runs in the background — switch to other projects and come back later to check progress or results (leaving the page won't interrupt it).",
+    "Refresh progress": "Refresh progress",
+    "Leave to other projects": "Go to other projects",
+    "Generating image": "Generating image",
+    "Production failed": "Production failed",
+    "Production done": "Production done",
+    "Auto motion for image-only segments": "Auto-motion image-only segments (Veo, dramatic)",
+    "Auto motion help": "When checked, segments that only have a static image get a Veo motion clip generated from that image + direction, for a dramatic result (Veo billed per second, ~1-3 min each, runs in background). Unchecked = static images shown with a slow zoom.",
+    "Open project": "Open",
+    "Back to projects": "Back to projects",
+    "Materials": "Materials"
   }
 }
