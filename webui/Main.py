@@ -1939,6 +1939,10 @@ if _sb:
                         and not _force_motion:
                     _reused += 1
                     continue  # 未修改且已渲染 → 直接沿用
+                # 內容自上次渲染後已變更（曾渲染過但簽章不符）→ 舊 Veo clip 已過期，
+                # 清掉讓其重產新片（保護尚未渲染過的手動 clip：無 rendered_sig 不動）
+                if _is_drama and s.get("rendered_sig") and s.get("rendered_sig") != _seg_sig(s):
+                    tm.purge_segment_media(_sb_tid, s)
                 _seg_inputs.append({"clip": s.get("clip"), "image": s.get("image"),
                                     "script_chunk": s.get("script_chunk"),
                                     "dialogue_text": s.get("dialogue_text", ""), "index": i})
@@ -1991,6 +1995,10 @@ if _sb:
                 if st.button("🔁 " + tr("Re-render Segment"), key=f"reseg_{_sb_tid}_{seg.get('uid', i)}",
                              use_container_width=True):
                     _vm = voice.assign_character_voices(_sb_chars, engine=config.ui.get("drama_voice_engine","edge"))
+                    # 戲劇模式重新產製：清掉舊 Veo clip／段落影片，讓其重產新的對嘴影片
+                    if _is_drama:
+                        tm.purge_segment_media(_sb_tid, seg)
+                        _save_storyboard_data(_sb_tid, _sb_style, _segments)
                     _one = [{"clip": seg.get("clip"), "image": seg.get("image"),
                              "script_chunk": seg.get("script_chunk"),
                              "dialogue_text": seg.get("dialogue_text", ""), "index": i}]
@@ -2247,9 +2255,15 @@ if _sb:
             _ncell = len(_beats_cut) or 25
             _nart = len(_art_shots) or 9
             _N = max(1, len(_text_board))
+            # 重新切版＝重新產製：段數變少時，多出來的舊段落連同已產製影片一併移除
+            _old_segments = _segments
+            for _extra in _old_segments[len(_text_board):]:
+                tm.purge_segment_media(_sb_tid, _extra, drop=True)
             _new_segs = []
             for _ti, _row in enumerate(_text_board):
-                _base = _segments[_ti] if _ti < len(_segments) else _new_segment()
+                _base = _old_segments[_ti] if _ti < len(_old_segments) else _new_segment()
+                # 沿用的舊段落先清掉舊 Veo clip／段落影片／串場（避免重切後仍用到舊內容）
+                tm.purge_segment_media(_sb_tid, _base)
                 _ms = next((ln["line"] for ln in voice.parse_dialogue_lines(_row.get("dialogue", ""))
                             if ln.get("line")), "")
                 # 對應的分鏡格編號：優先用 text_board 已標註的編號，否則依序平均計算。

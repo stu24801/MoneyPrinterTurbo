@@ -346,6 +346,31 @@ def job_generate_text_board(task_id, params: VideoParams, style, n_segments=0):
     return {"rows": len(rows)}
 
 
+def purge_segment_media(task_id, seg, drop=False):
+    """Remove a segment's previously generated media so a re-run regenerates fresh
+    instead of reusing stale artifacts: the Veo clip (llm-video-{uid}.mp4), the
+    rendered segment video, and the bridge clip + its audio/subtitle. Only files
+    inside the task dir are removed. Clears the corresponding fields on seg unless
+    drop=True (the segment is being removed entirely)."""
+    tdir = os.path.abspath(utils.task_dir(task_id))
+    uid = seg.get("uid")
+    targets = [seg.get("clip"), seg.get("segment_video"), seg.get("bridge_clip")]
+    if uid is not None:
+        targets += [os.path.join(tdir, n) for n in (
+            f"llm-video-{uid}.mp4", f"bridge-{uid}.mp4", f"bridge-{uid}-audio.mp3",
+            f"bridge-{uid}.srt", f"bridge-{uid}-sub.mp3")]
+    for p in targets:
+        try:
+            if p and os.path.isfile(p) and os.path.abspath(p).startswith(tdir):
+                os.remove(p)
+        except OSError:
+            pass
+    if not drop:
+        for k in ("clip", "segment_video", "bridge_clip", "bridge_narration",
+                  "rendered_sig", "motion_note"):
+            seg.pop(k, None)
+
+
 def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
                         auto_motion=False, voice_mode="tts"):
     """Render the given segment inputs, updating segment_video by index and
@@ -528,6 +553,21 @@ def job_merge(task_id, params: VideoParams, use_transitions=True, with_bridges=F
     segs = data.get("segments", [])
     bridge_voice = params.voice_name or "zh-TW-HsiaoChenNeural-Female"
     style = data.get("style", "")
+    # 重新合併＝重新產製：先移除舊的成片，避免合併失敗時殘留舊檔被當成新結果
+    _old_final = os.path.join(utils.task_dir(task_id), "final-1.mp4")
+    try:
+        if os.path.isfile(_old_final):
+            os.remove(_old_final)
+    except OSError:
+        pass
+
+    import hashlib
+
+    def _bridge_sig(s, nxt):
+        return hashlib.md5(
+            ((s.get("transition_note") or "") + "|" + _seg_beat(s, "last") + "|"
+             + _seg_beat(nxt, "first") + "|" + str(bool(bridge_narration))
+             ).encode("utf-8")).hexdigest()[:12]
 
     ordered_files, ordered_fx = [], []
     for i, s in enumerate(segs):
@@ -544,8 +584,9 @@ def job_merge(task_id, params: VideoParams, use_transitions=True, with_bridges=F
         # 串場：段落之後（最後一段除外）插入依串接說明生成的過渡片段
         if with_bridges and i < len(segs) - 1:
             bclip = s.get("bridge_clip")
-            # 旁白模式改變時，已快取的串場要重新產製
-            _stale = bool(bclip) and s.get("bridge_narration") != bool(bridge_narration)
+            # 旁白模式或前後段內容變更時，已快取的串場要重新產製
+            _sig = _bridge_sig(s, segs[i + 1] if i + 1 < len(segs) else None)
+            _stale = bool(bclip) and s.get("bridge_sig") != _sig
             if not (bclip and os.path.exists(bclip)) or _stale:
                 jobs.update_progress(task_id, "merge", i, len(segs), f"bridge {i + 1}")
                 bclip = _generate_bridge(task_id, params, s, i, style, bridge_voice,
@@ -555,6 +596,7 @@ def job_merge(task_id, params: VideoParams, use_transitions=True, with_bridges=F
                 if bclip:
                     s["bridge_clip"] = bclip
                     s["bridge_narration"] = bool(bridge_narration)
+                    s["bridge_sig"] = _sig
                     _save_sb(task_id, data)
             if bclip and os.path.exists(bclip):
                 ordered_files.append(bclip)
