@@ -1220,23 +1220,53 @@ def _load_stage(task_id: str) -> str:
 
 
 def _save_storyboard_data(task_id: str, style: str, segments: list, characters=None, stage=None):
-    # characters/stage = None → keep whatever is already on disk
+    # characters/stage = None → keep whatever is already on disk. Extra pipeline
+    # fields (plot_board / art_shots / text_board) are always preserved.
     existing = {}
-    if characters is None or stage is None:
-        try:
-            with open(_storyboard_file(task_id), "r", encoding="utf-8") as f:
-                existing = json.load(f)
-                if not isinstance(existing, dict):
-                    existing = {}
-        except Exception:
-            existing = {}
+    try:
+        with open(_storyboard_file(task_id), "r", encoding="utf-8") as f:
+            existing = json.load(f)
+            if not isinstance(existing, dict):
+                existing = {}
+    except Exception:
+        existing = {}
     if characters is None:
         characters = existing.get("characters", [])
     if stage is None:
         stage = existing.get("stage", "board")
+    out = dict(existing)
+    out.update({"style": style, "characters": characters, "segments": segments, "stage": stage})
     with open(_storyboard_file(task_id), "w", encoding="utf-8") as f:
-        json.dump({"style": style, "characters": characters, "segments": segments,
-                   "stage": stage}, f, ensure_ascii=False, indent=2)
+        json.dump(out, f, ensure_ascii=False, indent=2)
+
+
+def _load_pipeline(task_id: str) -> dict:
+    """Whole-story pre-production artifacts: plot_board / art_shots / text_board."""
+    try:
+        with open(_storyboard_file(task_id), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return {"plot_board": data.get("plot_board", {}) or {},
+                "art_shots": data.get("art_shots", []) or [],
+                "text_board": data.get("text_board", []) or []}
+    except Exception:
+        return {}
+
+
+def _patch_storyboard(task_id: str, **fields):
+    """Merge arbitrary top-level fields into storyboard.json (e.g. text_board edits,
+    a new stage) without disturbing the rest."""
+    try:
+        with open(_storyboard_file(task_id), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    data.update(fields)
+    with open(_storyboard_file(task_id), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def _ensure_character_appearances(task_id, characters, style):
@@ -1342,7 +1372,9 @@ def _build_storyboard(task_id: str, materials: list, segment_count: int = 0, dra
                 "video_prompt": d.get("video_direction", ""),
                 "transition_effect": d.get("transition_effect", "none"),
             })
-        _save_storyboard_data(task_id, film_style, segments, characters=characters)
+        # 戲劇模式：進入新的整片前製流程（角色樣板稿 → 25 格劇情分鏡圖 →
+        # 9 鏡位美術構圖 → 文字分鏡圖 → 切版到段落），起始於角色樣板稿階段。
+        _save_storyboard_data(task_id, film_style, segments, characters=characters, stage="cast")
         return segments
 
     chunks = _split_script_chunks(script_text, n)
@@ -1387,7 +1419,7 @@ if storyboard_button:
         _build_storyboard(task_id, result.get("materials", []),
                           segment_count=result.get("segment_count", 0),
                           drama=result.get("drama"))
-    st.session_state["storyboard"] = {"task_id": task_id, "stage": "board"}
+    st.session_state["storyboard"] = {"task_id": task_id, "stage": "auto"}
 
 def _aspect_val(params):
     """params.video_aspect may be a VideoAspect enum or a raw string ('9:16')."""
@@ -1407,7 +1439,9 @@ def _render_job_panel(task_id, job):
     st.subheader("📋 " + tr("Storyboard Review"))
     kind = job.get("kind", "")
     _kind_label = {"image": tr("Generating image"), "clip": tr("Generating Segment Clip"),
-                   "segments": tr("Rendering Segments"), "merge": tr("Merging Segments")}.get(kind, kind)
+                   "segments": tr("Rendering Segments"), "merge": tr("Merging Segments"),
+                   "plotboard": tr("Generating plot board"), "artshots": tr("Generating art shots"),
+                   "textboard": tr("Generating text board")}.get(kind, kind)
     done = job.get("progress_done", 0)
     total = job.get("progress_total", 0) or 0
     st.info("⏳ **" + tr("Producing in background") + "**　" + _kind_label +
@@ -1431,7 +1465,9 @@ if _sb:
 
     # 批次任務（分段渲染 / 合併）→ 獨占進度面板、略過編輯；
     # 個別分鏡圖/影片（img:/clip: key）可並行、不阻塞編輯，於段落內處理。
-    _batch_key = "batch" if _all_jobs.get("batch") else ("merge" if _all_jobs.get("merge") else None)
+    _batch_key = "batch" if _all_jobs.get("batch") else (
+        "merge" if _all_jobs.get("merge") else
+        next((k for k in ("plotboard", "artshots", "textboard") if _all_jobs.get(k)), None))
     _batch = _all_jobs.get(_batch_key) if _batch_key else None
     if _batch and _batch.get("status") == "running":
         _render_job_panel(_sb_tid, _batch)
@@ -1454,8 +1490,11 @@ if _sb:
                 st.session_state.pop("storyboard", None)
                 st.rerun()
             _sb = None
-        else:  # 分段渲染完成
+        else:  # 分段渲染 / 前製流程步驟完成 → 依磁碟上推進後的 stage 前進
             jobs.clear(_sb_tid, _batch_key)
+            _done_stage = _load_stage(_sb_tid)
+            if _done_stage:
+                st.session_state["storyboard"]["stage"] = _done_stage
             st.rerun()
 
 if _sb:
@@ -1475,11 +1514,17 @@ if _sb:
     if _is_drama and _sb_chars and _ensure_character_appearances(_sb_tid, _sb_chars, _sb_style):
         _save_storyboard_data(_sb_tid, _sb_style, _segments, characters=_sb_chars)
 
+    _pipeline = _load_pipeline(_sb_tid)
+    _plot_board = _pipeline.get("plot_board", {})
+    _art_shots = _pipeline.get("art_shots", [])
+    _text_board = _pipeline.get("text_board", [])
+    _drama_stages = ("cast", "plotboard", "artshots", "textboard", "board", "segments")
+
     _sb_stage = _sb.get("stage", "board")
     if _sb_stage == "auto":
         # Prefer the stage the user explicitly saved; else infer from progress.
         _saved_stage = _load_stage(_sb_tid)
-        if _saved_stage in ("board", "segments"):
+        if _saved_stage in _drama_stages:
             _sb_stage = _saved_stage
         else:
             _all_rendered = bool(_segments) and all(
@@ -1487,6 +1532,25 @@ if _sb:
             )
             _sb_stage = "segments" if _all_rendered else "board"
         st.session_state["storyboard"]["stage"] = _sb_stage
+
+    # 戲劇整片前製流程的階段導覽（可自由回到任一已完成階段調整）
+    if _is_drama:
+        _stage_labels = {"cast": "① " + tr("Character sheet"),
+                         "plotboard": "② " + tr("Plot board"),
+                         "artshots": "③ " + tr("Art shots"),
+                         "textboard": "④ " + tr("Text board"),
+                         "board": "⑤ " + tr("Segments"),
+                         "segments": "⑥ " + tr("Review")}
+        _nav_cols = st.columns(len(_drama_stages))
+        for _si, _stg in enumerate(_drama_stages):
+            _cur = _stg == _sb_stage
+            if _nav_cols[_si].button(_stage_labels[_stg], key=f"nav_{_sb_tid}_{_stg}",
+                                     use_container_width=True,
+                                     type=("primary" if _cur else "secondary")):
+                st.session_state["storyboard"]["stage"] = _stg
+                _patch_storyboard(_sb_tid, stage=_stg)
+                st.rerun()
+        st.divider()
 
     # 舊版故事版缺全片風格或演繹腳本 → 一次補產
     if _segments and (not _sb_style or all(not s.get("video_prompt") for s in _segments)):
@@ -1643,11 +1707,15 @@ if _sb:
                 if _clip_running:
                     st.info("🎥 " + tr("Generating Segment Clip") + " …")
                 else:
-                    if not _has_img:
+                    if not _has_img and not _is_drama:
                         st.caption("ℹ️ " + tr("Generate image first for image-to-video"))
                     if st.button("🎥 " + tr("Generate Segment Clip"), key=f"segvid_{_sb_tid}_{_uid}",
                                  use_container_width=True, disabled=_img_running):
                         _vp = st.session_state.get(f"sb_{_sb_tid}_{_uid}_vprompt", seg.get("video_prompt", ""))
+                        # 戲劇模式：段落影片底稿只出台詞對嘴（無人聲，後續配音），
+                        # 用角色演出台詞的 prompt 讓嘴型/表情吻合。
+                        if _is_drama and (seg.get("dialogue_text") or "").strip():
+                            _vp = tm.drama_video_prompt(seg)
                         if not (_vp or "").strip():
                             st.error(tr("Video direction required"))
                         else:
@@ -1660,8 +1728,10 @@ if _sb:
                                         av=_av, md=_sd, ri=_refimg:
                                         tm.job_generate_clip(_sb_tid, uid, p, av, md, _sb_style, ri)))
                             st.rerun()
-                # ── 分鏡圖按鈕 / 狀態 ──
-                if _img_running:
+                # ── 分鏡圖按鈕 / 狀態 ──（戲劇模式：段落分鏡圖已由 25 格劇情分鏡圖取代）
+                if _is_drama:
+                    pass
+                elif _img_running:
                     st.info("🖼 " + tr("Generating image") + " …")
                 else:
                     _img_btn_label = ("🔄 " + tr("Regenerate Image")) if seg.get("image") \
@@ -1951,6 +2021,183 @@ if _sb:
             st.rerun()
         if c_drop.button("🗑 " + tr("Discard Storyboard"), use_container_width=True):
             del st.session_state["storyboard"]
+            st.rerun()
+
+    elif _sb_stage == "cast":
+        # ① 角色樣板稿：設定角色、配音引擎、產製角色參考圖（model sheet）
+        st.markdown("#### ① " + tr("Character sheet"))
+        st.caption(tr("Cast stage hint"))
+        _sb_style = st.text_input("🎨 " + tr("Film Style"), value=_sb_style,
+                                  key=f"sb_{_sb_tid}_style_cast", help=tr("Film Style Help"))
+        _cast_changed = False
+        for _ci, _ch in enumerate(_sb_chars):
+            _cc = st.columns([2, 1, 4])
+            _nn = _cc[0].text_input(tr("Character Name"), value=_ch.get("name", ""),
+                                    key=f"castc_{_sb_tid}_{_ci}_name")
+            _gg = _cc[1].selectbox(tr("Gender"), ["female", "male"],
+                                   index=0 if _ch.get("gender") == "female" else 1,
+                                   format_func=lambda x: tr("Female") if x == "female" else tr("Male"),
+                                   key=f"castc_{_sb_tid}_{_ci}_gender")
+            _dd = _cc[2].text_input(tr("Persona"), value=_ch.get("desc", ""),
+                                    key=f"castc_{_sb_tid}_{_ci}_desc")
+            if _nn != _ch.get("name") or _gg != _ch.get("gender") or _dd != _ch.get("desc"):
+                _ch["name"], _ch["gender"], _ch["desc"] = _nn, _gg, _dd
+                _cast_changed = True
+        _eng_opts = ["edge", "google"]
+        _saved_eng = config.ui.get("drama_voice_engine", "edge")
+        _dve = st.selectbox(
+            "🔊 " + tr("Drama voice engine"), _eng_opts,
+            index=_eng_opts.index(_saved_eng) if _saved_eng in _eng_opts else 0,
+            format_func=lambda x: tr("Edge voice (free)") if x == "edge" else tr("Google voice (natural)"),
+            key=f"dvec_{_sb_tid}")
+        config.ui["drama_voice_engine"] = _dve
+        if _cast_changed:
+            _save_storyboard_data(_sb_tid, _sb_style, _segments, characters=_sb_chars)
+        _refs_ready = bool(_sb_chars) and all(
+            c.get("ref_image") and os.path.exists(c["ref_image"]) for c in _sb_chars)
+        _rc = st.columns(len(_sb_chars) or 1)
+        for _ci, _ch in enumerate(_sb_chars):
+            with _rc[_ci]:
+                _rimg = _ch.get("ref_image", "")
+                if _rimg and os.path.exists(_rimg):
+                    st.image(_rimg, caption=_ch.get("name", ""), use_container_width=True)
+                else:
+                    st.caption("🎭 " + _ch.get("name", "") + "：" + tr("No reference yet"))
+        if st.button(("🔄 " if _refs_ready else "🎭 ") + tr("Prepare character references"),
+                     key=f"prepref_cast_{_sb_tid}", use_container_width=True):
+            with st.spinner(tr("Preparing character references")):
+                for _ch in _sb_chars:
+                    _ch["ref_image"] = ""
+                _ensure_character_refs(_sb_tid, _sb_chars, _sb_style, params.video_aspect)
+                _save_storyboard_data(_sb_tid, _sb_style, _segments, characters=_sb_chars)
+            st.rerun()
+        _save_storyboard_data(_sb_tid, _sb_style, _segments, characters=_sb_chars)
+        if not _refs_ready:
+            st.info("⚠️ " + tr("Prepare refs before plot board"))
+        if st.button("② " + tr("Generate plot board") + " →", key=f"toplot_{_sb_tid}",
+                     use_container_width=True, type="primary", disabled=not _refs_ready):
+            jobs.submit(_sb_tid, "plotboard", "plotboard",
+                        (lambda stl=_sb_style: tm.job_generate_plot_board(_sb_tid, params, stl, "")),
+                        total=1)
+            st.rerun()
+
+    elif _sb_stage == "plotboard":
+        # ② 25 格劇情分鏡圖（取代每段落分鏡圖）＋ 修改建議區 → 重新產製
+        st.markdown("#### ② " + tr("Plot board"))
+        st.caption(tr("Plot board hint"))
+        _pimg = _plot_board.get("image", "")
+        if _pimg and os.path.exists(_pimg):
+            st.image(_pimg, use_container_width=True, caption="25 " + tr("cells"))
+        else:
+            st.info(tr("No plot board yet"))
+        _sug = st.text_area("✏️ " + tr("Revision suggestions"),
+                            value=_plot_board.get("suggestions", ""),
+                            key=f"plotsug_{_sb_tid}", height=100,
+                            help=tr("Revision suggestions help"))
+        c_re, c_next = st.columns(2)
+        if c_re.button("🔄 " + tr("Regenerate plot board"), key=f"replot_{_sb_tid}",
+                       use_container_width=True):
+            jobs.submit(_sb_tid, "plotboard", "plotboard",
+                        (lambda stl=_sb_style, sg=_sug: tm.job_generate_plot_board(_sb_tid, params, stl, sg)),
+                        total=1)
+            st.rerun()
+        if c_next.button("③ " + tr("Generate art shots") + " →", key=f"toart_{_sb_tid}",
+                         use_container_width=True, type="primary",
+                         disabled=not (_pimg and os.path.exists(_pimg))):
+            _patch_storyboard(_sb_tid, plot_board={**_plot_board, "suggestions": _sug})
+            jobs.submit(_sb_tid, "artshots", "artshots",
+                        (lambda stl=_sb_style: tm.job_generate_art_shots(_sb_tid, params, stl)),
+                        total=9)
+            st.rerun()
+
+    elif _sb_stage == "artshots":
+        # ③ 環境 9 鏡位美術構圖
+        st.markdown("#### ③ " + tr("Art shots"))
+        st.caption(tr("Art shots hint"))
+        if _art_shots:
+            _acols = st.columns(3)
+            for _ai, _sh in enumerate(_art_shots):
+                with _acols[_ai % 3]:
+                    _aimg = _sh.get("image", "")
+                    if _aimg and os.path.exists(_aimg):
+                        st.image(_aimg, use_container_width=True,
+                                 caption=f"{_ai + 1}. {_sh.get('angle', '')}")
+                    else:
+                        st.caption(f"{_ai + 1}. {_sh.get('angle', '')}：" + tr("No image"))
+                    if _sh.get("prompt"):
+                        st.caption(_sh["prompt"])
+        else:
+            st.info(tr("No art shots yet"))
+        c_re, c_next = st.columns(2)
+        if c_re.button("🔄 " + tr("Regenerate art shots"), key=f"reart_{_sb_tid}",
+                       use_container_width=True):
+            jobs.submit(_sb_tid, "artshots", "artshots",
+                        (lambda stl=_sb_style: tm.job_generate_art_shots(_sb_tid, params, stl)),
+                        total=9)
+            st.rerun()
+        if c_next.button("④ " + tr("Generate text board") + " →", key=f"totext_{_sb_tid}",
+                         use_container_width=True, type="primary",
+                         disabled=not any(s.get("image") for s in _art_shots)):
+            _n = len(_segments) or 5
+            jobs.submit(_sb_tid, "textboard", "textboard",
+                        (lambda stl=_sb_style, n=_n: tm.job_generate_text_board(_sb_tid, params, stl, n)),
+                        total=1)
+            st.rerun()
+
+    elif _sb_stage == "textboard":
+        # ④ 文字分鏡圖（場景／角色情緒／台詞／動作解析）→ 切版到段落
+        st.markdown("#### ④ " + tr("Text board"))
+        st.caption(tr("Text board hint"))
+        if not _text_board:
+            st.info(tr("No text board yet"))
+        _tb_changed = False
+        for _ti, _row in enumerate(_text_board):
+            with st.expander(f"🎬 {tr('Segment')} {_ti + 1}：{_row.get('scene', '')[:24]}",
+                             expanded=False):
+                _sc = st.text_input(tr("Scene"), value=_row.get("scene", ""),
+                                    key=f"tb_{_sb_tid}_{_ti}_scene")
+                _em = st.text_input("😊 " + tr("Character emotion"), value=_row.get("emotion", ""),
+                                    key=f"tb_{_sb_tid}_{_ti}_emo")
+                _dl = st.text_area("💬 " + tr("Dialogue"), value=_row.get("dialogue", ""),
+                                   key=f"tb_{_sb_tid}_{_ti}_dlg", height=100)
+                _ac = st.text_area("🎥 " + tr("Action breakdown"), value=_row.get("action", ""),
+                                   key=f"tb_{_sb_tid}_{_ti}_act", height=70)
+                if (_sc, _em, _dl, _ac) != (_row.get("scene", ""), _row.get("emotion", ""),
+                                            _row.get("dialogue", ""), _row.get("action", "")):
+                    _row.update({"scene": _sc, "emotion": _em, "dialogue": _dl, "action": _ac})
+                    _tb_changed = True
+        if _tb_changed:
+            _patch_storyboard(_sb_tid, text_board=_text_board)
+        c_re, c_cut = st.columns(2)
+        if c_re.button("🔄 " + tr("Regenerate text board"), key=f"retext_{_sb_tid}",
+                       use_container_width=True):
+            _n = len(_segments) or len(_text_board) or 5
+            jobs.submit(_sb_tid, "textboard", "textboard",
+                        (lambda stl=_sb_style, n=_n: tm.job_generate_text_board(_sb_tid, params, stl, n)),
+                        total=1)
+            st.rerun()
+        if c_cut.button("✂️ " + tr("Cut into segments") + " →", key=f"cut_{_sb_tid}",
+                        use_container_width=True, type="primary", disabled=not _text_board):
+            # 切版：參考文字分鏡圖填入各段落。分鏡圖已由 25 格劇情分鏡圖取代，
+            # 段落不再產靜圖；影片底稿走「對嘴無人聲」Veo，人聲後續配音補上。
+            _new_segs = []
+            for _ti, _row in enumerate(_text_board):
+                _base = _segments[_ti] if _ti < len(_segments) else _new_segment()
+                _ms = next((ln["line"] for ln in voice.parse_dialogue_lines(_row.get("dialogue", ""))
+                            if ln.get("line")), "")
+                _base.update({
+                    "scene": _row.get("scene", ""),
+                    "dialogue_text": _row.get("dialogue", ""),
+                    "video_prompt": _row.get("action", "") or _row.get("scene", ""),
+                    "must_say": _ms,
+                    "script_chunk": "",
+                    "image": "",
+                })
+                _new_segs.append(_base)
+            _segments = _new_segs
+            _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="board")
+            st.session_state["storyboard"]["stage"] = "board"
+            st.toast("✂️ " + tr("Cut done"))
             st.rerun()
 
 

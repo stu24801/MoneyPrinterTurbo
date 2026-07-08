@@ -161,6 +161,104 @@ def job_generate_clip(task_id, uid, prompt, aspect_value, max_dur, style, refere
     return {"clip": vid, "uid": uid}
 
 
+def _script_text(task_id):
+    """Read the original script for this task (for whole-story pre-production)."""
+    try:
+        with open(path.join(utils.task_dir(task_id), "script.json"), "r", encoding="utf-8") as f:
+            return (json.load(f) or {}).get("script", "") or ""
+    except Exception:
+        return ""
+
+
+def _char_ref_paths(characters, limit=4):
+    """Existing character reference portrait paths (model sheets)."""
+    return [c["ref_image"] for c in (characters or [])
+            if c.get("ref_image") and os.path.exists(c["ref_image"])][:limit]
+
+
+def _all_appearance(characters):
+    return "；".join(f"{c.get('name','')}：{c.get('appearance','')}"
+                     for c in (characters or []) if c.get("appearance"))
+
+
+def job_generate_plot_board(task_id, params: VideoParams, style, suggestions="", n_cells=25):
+    """Whole-story 25-cell (5x5) plot storyboard image. Replaces per-segment boards.
+    `suggestions` steers a regeneration. Persists plot_board and advances stage."""
+    data = _load_sb(task_id)
+    characters = data.get("characters", [])
+    script = _script_text(task_id)
+    res = llm.generate_plot_board(script, characters, style=style,
+                                  n_cells=n_cells, suggestions=suggestions)
+    image_prompt = res.get("image_prompt") or "A 5x5 storyboard grid of the story"
+    img = material.generate_single_image_llm(
+        task_id, image_prompt, VideoAspect(_aspect_value(params)), style=style,
+        reference_images=_char_ref_paths(characters), appearance=_all_appearance(characters),
+        out_name="plot-board.png")
+    if not img:
+        raise RuntimeError("plot board image generation returned empty")
+    import hashlib
+    data = _load_sb(task_id)
+    data["plot_board"] = {
+        "image": img, "suggestions": suggestions, "beats": res.get("beats", []),
+        "sig": hashlib.md5((image_prompt + suggestions).encode("utf-8")).hexdigest()[:12]}
+    if data.get("stage") in (None, "", "cast", "board"):
+        data["stage"] = "plotboard"
+    _save_sb(task_id, data)
+    return {"image": img}
+
+
+def job_generate_art_shots(task_id, params: VideoParams, style, n=9):
+    """9 environment / camera-angle art compositions derived from the plot board.
+    Persists art_shots (list of {angle, prompt, image}) and advances stage."""
+    data = _load_sb(task_id)
+    characters = data.get("characters", [])
+    script = _script_text(task_id)
+    shots = llm.generate_art_shots(script, characters, style=style, n=n)
+    refs = _char_ref_paths(characters, limit=2)
+    plot_img = (data.get("plot_board") or {}).get("image", "")
+    ref_all = ([plot_img] if plot_img and os.path.exists(plot_img) else []) + refs
+    out = []
+    total = len(shots)
+    for i, sh in enumerate(shots):
+        jobs.update_progress(task_id, "artshots", i, total, f"shot {i + 1}")
+        p = (sh.get("prompt") or "").strip()
+        angle = sh.get("angle", "")
+        img = ""
+        if p:
+            comp = (f"環境美術構圖（{angle}）：{p}" if angle else p)
+            img = material.generate_single_image_llm(
+                task_id, comp, VideoAspect(_aspect_value(params)), index=f"art-{i}",
+                style=style, reference_images=ref_all[:4], out_name=f"art-shot-{i}.png")
+        out.append({"angle": angle, "prompt": p, "image": img or ""})
+    data = _load_sb(task_id)
+    data["art_shots"] = out
+    if data.get("stage") in (None, "", "plotboard"):
+        data["stage"] = "artshots"
+    _save_sb(task_id, data)
+    jobs.update_progress(task_id, "artshots", total, total, "done")
+    return {"count": sum(1 for s in out if s.get("image"))}
+
+
+def job_generate_text_board(task_id, params: VideoParams, style, n_segments=0):
+    """Detailed textual storyboard (per-segment scene / emotion / dialogue / action),
+    synthesized from the plot beats + art shots + character designs. Persists
+    text_board and advances stage; the UI's '切版' step cuts it into segments."""
+    data = _load_sb(task_id)
+    characters = data.get("characters", [])
+    script = _script_text(task_id)
+    beats = (data.get("plot_board") or {}).get("beats", [])
+    art = data.get("art_shots", [])
+    n = int(n_segments) or len(data.get("segments", [])) or 5
+    rows = llm.generate_text_board(script, characters, style=style, n_segments=n,
+                                   plot_beats=beats, art_shots=art)
+    data = _load_sb(task_id)
+    data["text_board"] = rows
+    if data.get("stage") in (None, "", "artshots"):
+        data["stage"] = "textboard"
+    _save_sb(task_id, data)
+    return {"rows": len(rows)}
+
+
 def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
                         auto_motion=False, voice_mode="tts"):
     """Render the given segment inputs, updating segment_video by index and
@@ -173,23 +271,45 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
     _sb0 = _load_sb(task_id)
     style = _sb0.get("style", "")
     characters = _sb0.get("characters", [])
+    _drama = getattr(params, "presentation_mode", "narration") == "drama" or bool(characters)
     for pos, inp in enumerate(seg_inputs):
         idx = int(inp.get("index", pos))
         data = _load_sb(task_id)
         segs = data.get("segments", [])
-        # 自愈：段落沒有分鏡圖也沒有影片 → 先自動產生分鏡圖（否則無法渲染）
+        # 自愈：段落沒有分鏡圖也沒有影片 → 先自動補素材（否則無法渲染）
         if 0 <= idx < len(segs):
             s = segs[idx]
             _clip = s.get("clip") or ""
             _image = s.get("image") or ""
             _has_clip = _clip and os.path.exists(_clip)
             _has_image = _image and os.path.exists(_image)
-            if not _has_clip and not _has_image:
+            if not _has_clip and not _has_image and _drama:
+                # 戲劇新流程：段落分鏡圖已由 25 格劇情分鏡圖取代，不再產靜圖。
+                # 直接產出「只出台詞對嘴、無人聲」的 Veo 影片底稿（人聲後續配音補上），
+                # 以角色參考圖 + 外型維持一致長相。
+                jobs.update_progress(task_id, "batch", pos, total, f"segment {idx + 1} · clip")
+                vdir = drama_video_prompt(s) if (s.get("dialogue_text") or "").strip() \
+                    else (s.get("video_prompt") or s.get("scene") or "cinematic scene")
+                _seg_dur = int(s.get("duration") or params.video_clip_duration or 6)
+                _refs = _char_ref_paths(characters, limit=1)
+                _note = {}
+                vid = material.generate_single_video_llm(
+                    task_id, vdir, VideoAspect(_aspect_value(params)),
+                    max_clip_duration=_seg_dur, index=s.get("uid", idx),
+                    style=style, reference_image=(_refs[0] if _refs else ""),
+                    note_out=_note, appearance=_seg_appearance(s, characters))
+                if vid:
+                    data = _load_sb(task_id)
+                    segs = data.get("segments", [])
+                    segs[idx]["clip"] = vid
+                    segs[idx]["motion_note"] = _note.get("motion", "")
+                    inp["clip"] = vid
+                    _save_sb(task_id, data)
+            elif not _has_clip and not _has_image:
                 jobs.update_progress(task_id, "batch", pos, total, f"segment {idx + 1} · image")
                 _iprompt = (s.get("prompt") or s.get("video_prompt")
                             or s.get("scene") or s.get("dialogue_text")
                             or s.get("script_chunk") or "cinematic scene")
-                # 戲劇模式：帶入該段角色外型，維持一致長相
                 _appear = _seg_appearance(s, characters)
                 _img = material.generate_single_image_llm(
                     task_id, _iprompt, VideoAspect(_aspect_value(params)),

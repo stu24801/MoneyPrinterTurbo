@@ -678,6 +678,184 @@ Then, for each numbered segment of the video script below, produce:
     return fallback
 
 
+def _character_brief(characters: list) -> str:
+    """One-line cast summary for prompt conditioning."""
+    parts = []
+    for c in (characters or []):
+        nm = c.get("name", "")
+        if not nm:
+            continue
+        desc = c.get("appearance") or c.get("desc") or ""
+        parts.append(f"{nm}（{desc}）" if desc else nm)
+    return "；".join(parts)
+
+
+def generate_plot_board(video_script: str, characters: list, style: str = "",
+                        n_cells: int = 25, suggestions: str = "") -> dict:
+    """25-cell (5x5) plot storyboard. Break the whole story into n_cells sequential
+    visual beats, then compose a SINGLE labeled grid image prompt drawing all beats
+    with consistent characters. `suggestions` (optional) is user feedback to steer a
+    regeneration. Returns {"beats": [str,...], "image_prompt": str}."""
+    cast = _character_brief(characters)
+    fallback = {"beats": [], "image_prompt": ""}
+    sug_hint = ("\n7. Revision request from the director — honor it: " + suggestions.strip()) \
+        if (suggestions or "").strip() else ""
+    prompt = f"""
+# Role: Film Storyboard Artist
+
+## Goals:
+Break the story below into EXACTLY {n_cells} sequential visual beats (a 5x5 storyboard grid, read left-to-right, top-to-bottom). Each beat is one concrete camera shot that advances the plot.
+
+## Constrains:
+1. Return ONLY a json object: {{"beats": ["...", "..."]}} with EXACTLY {n_cells} strings, in story order.
+2. Each beat: one short visual sentence (who is in frame, their action/expression, the setting). Same language as the story. Under 30 characters (Chinese) / 12 words each.
+3. Keep the named characters consistent; use only these characters: {cast or "(derive a small recurring cast)"}.
+4. Purely visual — no dialogue text, no narration, no on-screen captions.{sug_hint}
+
+## Story
+{video_script}
+""".strip()
+    beats = []
+    for _ in range(_max_retries):
+        try:
+            response = _generate_response(prompt)
+            if "Error: " in response:
+                continue
+            m = re.search(r"\{.*\}", response, re.DOTALL)
+            if not m:
+                continue
+            data = json.loads(m.group(0))
+            arr = data.get("beats", []) if isinstance(data, dict) else []
+            beats = [str(x)[:60] for x in arr if str(x).strip()][:n_cells]
+            if beats:
+                break
+        except Exception as e:
+            logger.warning(f"plot board beats generation failed: {e}")
+    if not beats:
+        return fallback
+    # pad to n_cells so the grid stays 5x5
+    while len(beats) < n_cells:
+        beats.append("")
+    panel_lines = "; ".join(f"Panel {i + 1}: {b}" for i, b in enumerate(beats) if b)
+    style_part = f" Overall visual style: {style.strip()}." if (style or "").strip() else ""
+    cast_part = f" Keep these characters visually consistent across every panel: {cast}." if cast else ""
+    sug_part = f" Director's revision note: {suggestions.strip()}." if (suggestions or "").strip() else ""
+    image_prompt = (
+        f"A single storyboard sheet: one 5x5 grid of {n_cells} numbered comic panels "
+        f"telling a story in sequence, read left-to-right and top-to-bottom. Clean "
+        f"hand-drawn black-and-white storyboard sketch style, each panel clearly framed "
+        f"and labeled with its panel number (1-{n_cells}). {panel_lines}.{cast_part}{style_part}{sug_part} "
+        f"No color, no speech bubbles, no dialogue text besides the panel numbers."
+    )
+    return {"beats": beats, "image_prompt": image_prompt}
+
+
+def generate_art_shots(video_script: str, characters: list, style: str = "",
+                       n: int = 9) -> list:
+    """9 environment / camera-angle art compositions (establishing shots) of the key
+    locations of the story. Returns [{"angle": str, "prompt": str}, ...] of length n."""
+    cast = _character_brief(characters)
+    prompt = f"""
+# Role: Cinematography & Art Direction Designer
+
+## Goals:
+From the story below, design EXACTLY {n} environment art compositions (establishing shots) that together cover the key locations and camera set-ups of the film. These are unpeopled or lightly-peopled scene paintings that define the world and lighting.
+
+## Constrains:
+1. Return ONLY a json object: {{"shots": [{{"angle": "...", "desc": "..."}}, ...]}} with EXACTLY {n} objects.
+2. "angle": short label of the camera set-up (e.g. 廣角全景, 低角度仰視, 過肩鏡頭, 俯視大遠景, 特寫). Same language as the story.
+3. "desc": one sentence describing the location, composition, lighting and mood for an AI image generator. Under 50 characters (Chinese) / 20 words. Purely visual, no text overlays.
+4. Coherent with the film style: {style or "(define a consistent look)"}. Recurring characters (context only): {cast or "(none)"}.
+
+## Story
+{video_script}
+""".strip()
+    for _ in range(_max_retries):
+        try:
+            response = _generate_response(prompt)
+            if "Error: " in response:
+                continue
+            m = re.search(r"\{.*\}", response, re.DOTALL)
+            if not m:
+                continue
+            data = json.loads(m.group(0))
+            arr = data.get("shots", []) if isinstance(data, dict) else []
+            shots = []
+            for item in arr[:n]:
+                if not isinstance(item, dict):
+                    continue
+                shots.append({"angle": str(item.get("angle", ""))[:24],
+                              "prompt": str(item.get("desc", ""))[:160]})
+            if shots:
+                while len(shots) < n:
+                    shots.append({"angle": "", "prompt": ""})
+                return shots
+        except Exception as e:
+            logger.warning(f"art shots generation failed: {e}")
+    return [{"angle": "", "prompt": ""} for _ in range(n)]
+
+
+def generate_text_board(video_script: str, characters: list, style: str = "",
+                        n_segments: int = 0, plot_beats: list = None,
+                        art_shots: list = None) -> list:
+    """Detailed textual storyboard, one row per segment. Combines the plot beats,
+    character designs and art shots into per-segment {"scene", "emotion", "dialogue",
+    "action"}. dialogue lines use the 角色名（情感）：台詞 format. Returns a list of
+    dicts of length n_segments."""
+    n = max(1, int(n_segments) or (len(plot_beats or []) or 5))
+    cast = _character_brief(characters)
+    beats_ctx = "\n".join(f"- {b}" for b in (plot_beats or []) if b)
+    shots_ctx = "\n".join(f"- {s.get('angle','')}：{s.get('prompt','')}"
+                          for s in (art_shots or []) if s.get("prompt"))
+    ref_block = ""
+    if beats_ctx:
+        ref_block += f"\n## Plot board beats (visual reference)\n{beats_ctx}"
+    if shots_ctx:
+        ref_block += f"\n## Environment art shots (visual reference)\n{shots_ctx}"
+    prompt = f"""
+# Role: Short-Drama Storyboard Writer
+
+## Goals:
+Using the story and the visual references below, write a DETAILED textual storyboard split into EXACTLY {n} segments. Each segment is a shootable beat with acted dialogue.
+
+## Constrains:
+1. Return ONLY a json object: {{"segments": [{{"scene": "...", "emotion": "...", "dialogue": "...", "action": "..."}}, ...]}} with EXACTLY {n} objects, in story order.
+2. "scene": one sentence of what happens / where (plot beat). Under 40 characters.
+3. "emotion": the dominant emotional tone of the characters in this segment. Under 20 characters.
+4. "dialogue": acted lines, ONE line per utterance, EXACT format per line: 角色名（情感）：台詞 — emotion from 平靜, 開心, 激動, 悲傷, 嚴肅, 溫柔, 疑惑, 緊張. 1-3 lines.
+5. "action": camera + character action breakdown (blocking, expression, camera move, lighting). Under 80 characters. Purely visual, no captions.
+6. Same language as the story. Use only these characters: {cast or "(a small recurring cast)"}. Keep them consistent with the film style: {style}.{ref_block}
+
+## Story
+{video_script}
+""".strip()
+    fallback = [{"scene": "", "emotion": "", "dialogue": "", "action": ""} for _ in range(n)]
+    for _ in range(_max_retries):
+        try:
+            response = _generate_response(prompt)
+            if "Error: " in response:
+                continue
+            m = re.search(r"\{.*\}", response, re.DOTALL)
+            if not m:
+                continue
+            data = json.loads(m.group(0))
+            arr = data.get("segments", []) if isinstance(data, dict) else []
+            rows = []
+            for i in range(n):
+                item = arr[i] if i < len(arr) and isinstance(arr[i], dict) else {}
+                rows.append({
+                    "scene": str(item.get("scene", ""))[:120],
+                    "emotion": str(item.get("emotion", ""))[:40],
+                    "dialogue": str(item.get("dialogue", ""))[:600],
+                    "action": str(item.get("action", ""))[:240],
+                })
+            if any(r["dialogue"] or r["scene"] for r in rows):
+                return rows
+        except Exception as e:
+            logger.warning(f"text board generation failed: {e}")
+    return fallback
+
+
 if __name__ == "__main__":
     video_subject = "生命的意义是什么"
     script = generate_script(
