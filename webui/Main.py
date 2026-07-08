@@ -1249,6 +1249,7 @@ def _load_pipeline(task_id: str) -> dict:
             return {}
         return {"plot_board": data.get("plot_board", {}) or {},
                 "art_shots": data.get("art_shots", []) or [],
+                "art_board": data.get("art_board", {}) or {},
                 "text_board": data.get("text_board", []) or []}
     except Exception:
         return {}
@@ -1517,6 +1518,7 @@ if _sb:
     _pipeline = _load_pipeline(_sb_tid)
     _plot_board = _pipeline.get("plot_board", {})
     _art_shots = _pipeline.get("art_shots", [])
+    _art_board = _pipeline.get("art_board", {})
     _text_board = _pipeline.get("text_board", [])
     _drama_stages = ("cast", "plotboard", "artshots", "textboard", "board", "segments")
 
@@ -1686,14 +1688,22 @@ if _sb:
             with c_media:
                 _clip = seg.get("clip", "")
                 _is_veo = "llm-video-" in os.path.basename(str(_clip))
+                _board_img = seg.get("board_image", "")
+                _has_board = bool(_board_img) and os.path.exists(_board_img)
                 if _is_veo and os.path.exists(_clip):
                     st.video(_clip)
                 elif seg.get("image") and os.path.exists(seg["image"]):
                     st.image(seg["image"], use_container_width=True)
                 elif _clip and os.path.exists(_clip):
                     st.video(_clip)
+                elif _has_board:
+                    st.image(_board_img, use_container_width=True,
+                             caption="🎞 " + tr("Corresponding plot cell"))
                 else:
                     st.caption("🖼 " + tr("No storyboard image yet"))
+                # 有影片時，另附對應的 25 格劇情分鏡格供對照（產影片會以此為構圖錨點）
+                if _has_board and _is_veo and os.path.exists(_clip):
+                    st.image(_board_img, width=140, caption="🎞 " + tr("Corresponding plot cell"))
                 _mn = seg.get("motion_note", "")
                 if _mn == "text_fallback_policy":
                     st.warning("⚠️ " + tr("Motion image rejected"))
@@ -1722,7 +1732,9 @@ if _sb:
                             _rdesc = (seg.get("ref_desc") or "").strip()
                             _vp_full = _vp + (f"。{tr('Also include')}：{_rdesc}" if _rdesc else "")
                             _av = _aspect_val(params)
-                            _refimg = _seg_img if _has_img else ""
+                            # 戲劇模式優先以該段對應的 25 格分鏡格當構圖錨點（角色樣板
+                            # 另以外型文字注入），否則用該段既有靜圖。
+                            _refimg = _board_img if (_is_drama and _has_board) else (_seg_img if _has_img else "")
                             _sd = int(seg.get("duration") or params.video_clip_duration or 6)
                             jobs.submit(_sb_tid, _clip_key, "clip", (lambda uid=_uid, p=_vp_full,
                                         av=_av, md=_sd, ri=_refimg:
@@ -2107,37 +2119,34 @@ if _sb:
             _patch_storyboard(_sb_tid, plot_board={**_plot_board, "suggestions": _sug})
             jobs.submit(_sb_tid, "artshots", "artshots",
                         (lambda stl=_sb_style: tm.job_generate_art_shots(_sb_tid, params, stl)),
-                        total=9)
+                        total=1)
             st.rerun()
 
     elif _sb_stage == "artshots":
         # ③ 環境 9 鏡位美術構圖
         st.markdown("#### ③ " + tr("Art shots"))
         st.caption(tr("Art shots hint"))
+        _abimg = _art_board.get("image", "")
+        if _abimg and os.path.exists(_abimg):
+            st.image(_abimg, use_container_width=True, caption="9 " + tr("cells"))
+        else:
+            st.info(tr("No art shots yet"))
         if _art_shots:
             _acols = st.columns(3)
             for _ai, _sh in enumerate(_art_shots):
                 with _acols[_ai % 3]:
-                    _aimg = _sh.get("image", "")
-                    if _aimg and os.path.exists(_aimg):
-                        st.image(_aimg, use_container_width=True,
-                                 caption=f"{_ai + 1}. {_sh.get('angle', '')}")
-                    else:
-                        st.caption(f"{_ai + 1}. {_sh.get('angle', '')}：" + tr("No image"))
-                    if _sh.get("prompt"):
-                        st.caption(_sh["prompt"])
-        else:
-            st.info(tr("No art shots yet"))
+                    st.caption(f"{_ai + 1}. {_sh.get('angle', '')}"
+                               + (f"：{_sh['prompt']}" if _sh.get("prompt") else ""))
         c_re, c_next = st.columns(2)
         if c_re.button("🔄 " + tr("Regenerate art shots"), key=f"reart_{_sb_tid}",
                        use_container_width=True):
             jobs.submit(_sb_tid, "artshots", "artshots",
                         (lambda stl=_sb_style: tm.job_generate_art_shots(_sb_tid, params, stl)),
-                        total=9)
+                        total=1)
             st.rerun()
         if c_next.button("④ " + tr("Generate text board") + " →", key=f"totext_{_sb_tid}",
                          use_container_width=True, type="primary",
-                         disabled=not any(s.get("image") for s in _art_shots)):
+                         disabled=not (_abimg and os.path.exists(_abimg))):
             _n = len(_segments) or 5
             jobs.submit(_sb_tid, "textboard", "textboard",
                         (lambda stl=_sb_style, n=_n: tm.job_generate_text_board(_sb_tid, params, stl, n)),
@@ -2148,6 +2157,18 @@ if _sb:
         # ④ 文字分鏡圖（場景／角色情緒／台詞／動作解析）→ 切版到段落
         st.markdown("#### ④ " + tr("Text board"))
         st.caption(tr("Text board hint"))
+        # 對照參考：25 格劇情分鏡圖 + 角色樣板（切版文字腳本依此對應）
+        _pimg_tb = _plot_board.get("image", "")
+        _tb_refs = st.columns([2, 3])
+        if _pimg_tb and os.path.exists(_pimg_tb):
+            _tb_refs[0].image(_pimg_tb, use_container_width=True, caption="25 " + tr("cells"))
+        _ref_chars = [c for c in _sb_chars if c.get("ref_image") and os.path.exists(c["ref_image"])]
+        if _ref_chars:
+            with _tb_refs[1]:
+                _rcc = st.columns(len(_ref_chars))
+                for _ci, _ch in enumerate(_ref_chars):
+                    _rcc[_ci].image(_ch["ref_image"], use_container_width=True,
+                                    caption=_ch.get("name", ""))
         if not _text_board:
             st.info(tr("No text board yet"))
         _tb_changed = False
@@ -2178,13 +2199,25 @@ if _sb:
             st.rerun()
         if c_cut.button("✂️ " + tr("Cut into segments") + " →", key=f"cut_{_sb_tid}",
                         use_container_width=True, type="primary", disabled=not _text_board):
-            # 切版：參考文字分鏡圖填入各段落。分鏡圖已由 25 格劇情分鏡圖取代，
-            # 段落不再產靜圖；影片底稿走「對嘴無人聲」Veo，人聲後續配音補上。
+            # 切版：參考文字分鏡圖填入各段落，並把每段對應的 25 格劇情分鏡格
+            # 裁切出來（seg["board_image"]）供段落顯示與產影片時當構圖錨點。
+            # 分鏡圖已由 25 格劇情分鏡圖取代，段落不再產靜圖；影片底稿走「對嘴
+            # 無人聲」Veo（參考該段分鏡格＋角色樣板），人聲後續配音補上。
+            _pimg_cut = _plot_board.get("image", "")
+            _beats_cut = _plot_board.get("beats", []) or []
+            _ncell = len(_beats_cut) or 25
+            _N = max(1, len(_text_board))
             _new_segs = []
             for _ti, _row in enumerate(_text_board):
                 _base = _segments[_ti] if _ti < len(_segments) else _new_segment()
                 _ms = next((ln["line"] for ln in voice.parse_dialogue_lines(_row.get("dialogue", ""))
                             if ln.get("line")), "")
+                # 該段對應的分鏡格範圍（依閱讀順序平均切分 25 格）
+                _lo = _ti * _ncell // _N
+                _hi = max(_lo + 1, (_ti + 1) * _ncell // _N)
+                _mid = min(_ncell - 1, (_lo + _hi - 1) // 2)
+                _bimg = tm._crop_plot_cell(_sb_tid, _pimg_cut, _mid,
+                                           f"seg-board-{_base['uid']}.png") if _pimg_cut else ""
                 _base.update({
                     "scene": _row.get("scene", ""),
                     "dialogue_text": _row.get("dialogue", ""),
@@ -2192,6 +2225,9 @@ if _sb:
                     "must_say": _ms,
                     "script_chunk": "",
                     "image": "",
+                    "board_image": _bimg,
+                    "board_beats": _beats_cut[_lo:_hi],
+                    "board_cell": _mid,
                 })
                 _new_segs.append(_base)
             _segments = _new_segs

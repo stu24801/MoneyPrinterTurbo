@@ -819,6 +819,7 @@ def generate_text_board(video_script: str, characters: list, style: str = "",
 Using the story and the visual references below, write a DETAILED textual storyboard split into EXACTLY {n} segments. Each segment is a shootable beat with acted dialogue.
 
 ## Constrains:
+0. The {n} segments must cover the plot board beats IN ORDER: split the beats into {n} contiguous groups (~len(beats)/{n} each) and make segment k faithfully depict its group of beats, keeping characters consistent with the character sheet above.
 1. Return ONLY a json object: {{"segments": [{{"scene": "...", "emotion": "...", "dialogue": "...", "action": "..."}}, ...]}} with EXACTLY {n} objects, in story order.
 2. "scene": one sentence of what happens / where (plot beat). Under 40 characters.
 3. "emotion": the dominant emotional tone of the characters in this segment. Under 20 characters.

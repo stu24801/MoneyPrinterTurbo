@@ -257,7 +257,7 @@
     "Revision suggestions help": "Describe what to change (a panel's composition, a character action, the camera). Regeneration honors these notes.",
     "Regenerate plot board": "Regenerate plot board",
     "Generate art shots": "Generate 9 environment art shots",
-    "Art shots hint": "From the plot board, generate 9 environment/camera-angle art compositions that define locations and lighting.",
+    "Art shots hint": "Generate ONE environment art board (a 3x3 grid of 9 cells) from the plot board, covering the key locations, camera set-ups and lighting.",
     "No art shots yet": "No art shots yet.",
     "No image": "No image",
     "Regenerate art shots": "Regenerate art shots",
@@ -268,6 +268,7 @@
     "Action breakdown": "Action breakdown",
     "Regenerate text board": "Regenerate text board",
     "Cut into segments": "Cut into segments",
-    "Cut done": "Cut into segments from the text board"
+    "Cut done": "Cut into segments from the text board",
+    "Corresponding plot cell": "Corresponding plot cell"
   }
 }

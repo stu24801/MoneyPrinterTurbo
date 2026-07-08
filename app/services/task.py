@@ -207,9 +207,32 @@ def job_generate_plot_board(task_id, params: VideoParams, style, suggestions="",
     return {"image": img}
 
 
+def _crop_plot_cell(task_id, plot_image, cell_index, out_name, rows=5, cols=5):
+    """Crop one cell (reading order, 0-based) from a rows×cols grid storyboard
+    sheet, so a segment can show / anchor on ITS corresponding board panel.
+    Returns the saved crop path or ""."""
+    try:
+        from PIL import Image
+        if not (plot_image and os.path.exists(plot_image)):
+            return ""
+        im = Image.open(plot_image).convert("RGB")
+        w, h = im.size
+        cell_index = max(0, min(rows * cols - 1, int(cell_index)))
+        r, c = cell_index // cols, cell_index % cols
+        box = (int(c * w / cols), int(r * h / rows),
+               int((c + 1) * w / cols), int((r + 1) * h / rows))
+        out = os.path.join(utils.task_dir(task_id), out_name)
+        im.crop(box).save(out)
+        return out if os.path.exists(out) else ""
+    except Exception as e:
+        logger.warning(f"crop plot cell failed: {e}")
+        return ""
+
+
 def job_generate_art_shots(task_id, params: VideoParams, style, n=9):
-    """9 environment / camera-angle art compositions derived from the plot board.
-    Persists art_shots (list of {angle, prompt, image}) and advances stage."""
+    """Environment / camera-angle art board: ONE image split into a 3x3 grid of 9
+    numbered environment compositions (derived from the plot board & cast).
+    Persists art_shots (the 9 angle/prompt descriptions) + art_board {image}."""
     data = _load_sb(task_id)
     characters = data.get("characters", [])
     script = _script_text(task_id)
@@ -217,26 +240,28 @@ def job_generate_art_shots(task_id, params: VideoParams, style, n=9):
     refs = _char_ref_paths(characters, limit=2)
     plot_img = (data.get("plot_board") or {}).get("image", "")
     ref_all = ([plot_img] if plot_img and os.path.exists(plot_img) else []) + refs
-    out = []
-    total = len(shots)
-    for i, sh in enumerate(shots):
-        jobs.update_progress(task_id, "artshots", i, total, f"shot {i + 1}")
-        p = (sh.get("prompt") or "").strip()
-        angle = sh.get("angle", "")
-        img = ""
-        if p:
-            comp = (f"環境美術構圖（{angle}）：{p}" if angle else p)
-            img = material.generate_single_image_llm(
-                task_id, comp, VideoAspect(_aspect_value(params)), index=f"art-{i}",
-                style=style, reference_images=ref_all[:4], out_name=f"art-shot-{i}.png")
-        out.append({"angle": angle, "prompt": p, "image": img or ""})
+    panel_lines = "; ".join(f"Panel {i + 1} ({s.get('angle', '')}): {s.get('prompt', '')}"
+                            for i, s in enumerate(shots) if s.get("prompt"))
+    style_part = f" Visual style: {style.strip()}." if (style or "").strip() else ""
+    grid_prompt = (
+        f"A single art-direction sheet: one 3x3 grid of 9 numbered environment "
+        f"concept panels (establishing shots / camera set-ups), each panel clearly "
+        f"framed and labeled 1-9, read left-to-right and top-to-bottom. {panel_lines}."
+        f"{style_part} Coherent color palette and lighting across all panels. "
+        f"No characters foregrounded, no captions besides the panel numbers."
+    )
+    img = material.generate_single_image_llm(
+        task_id, grid_prompt, VideoAspect(_aspect_value(params)),
+        style=style, reference_images=ref_all[:4], out_name="art-board.png")
     data = _load_sb(task_id)
-    data["art_shots"] = out
+    data["art_shots"] = [{"angle": s.get("angle", ""), "prompt": s.get("prompt", "")} for s in shots]
+    data["art_board"] = {"image": img or ""}
     if data.get("stage") in (None, "", "plotboard"):
         data["stage"] = "artshots"
     _save_sb(task_id, data)
-    jobs.update_progress(task_id, "artshots", total, total, "done")
-    return {"count": sum(1 for s in out if s.get("image"))}
+    if not img:
+        raise RuntimeError("art board image generation returned empty")
+    return {"image": img}
 
 
 def job_generate_text_board(task_id, params: VideoParams, style, n_segments=0):
@@ -291,12 +316,16 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
                 vdir = drama_video_prompt(s) if (s.get("dialogue_text") or "").strip() \
                     else (s.get("video_prompt") or s.get("scene") or "cinematic scene")
                 _seg_dur = int(s.get("duration") or params.video_clip_duration or 6)
-                _refs = _char_ref_paths(characters, limit=1)
+                # 參考圖優先用該段對應的 25 格分鏡格（構圖錨點），退回角色樣板；
+                # 角色外型另以文字注入，兼顧「參考分鏡圖 + 角色樣板」。
+                _board = s.get("board_image") or ""
+                _ref = _board if (_board and os.path.exists(_board)) \
+                    else (_char_ref_paths(characters, limit=1) or [""])[0]
                 _note = {}
                 vid = material.generate_single_video_llm(
                     task_id, vdir, VideoAspect(_aspect_value(params)),
                     max_clip_duration=_seg_dur, index=s.get("uid", idx),
-                    style=style, reference_image=(_refs[0] if _refs else ""),
+                    style=style, reference_image=_ref,
                     note_out=_note, appearance=_seg_appearance(s, characters))
                 if vid:
                     data = _load_sb(task_id)
