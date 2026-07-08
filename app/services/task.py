@@ -106,8 +106,32 @@ def drama_video_prompt(seg):
         f"{ln['speaker']}（{ln['emotion']}）說：「{ln['line']}」" if ln.get("speaker")
         else ln["line"] for ln in lines if ln.get("line"))
     scene = (base + "。") if base else ""
-    return (f"{scene}角色對嘴說出以下台詞並以對應情緒表演（嘴型、表情、肢體動作要吻合說話內容）："
-            f"{perf}")
+    # 對應的 25 格劇情分鏡格：把該格編號與劇情描述帶進提示，讓構圖／情節
+    # 與對應分鏡格一致（board_image 已作為視覺錨點，這裡再以文字強化）。
+    board = ""
+    _cell = seg.get("board_cell")
+    _beats = [b for b in (seg.get("board_beats") or []) if b]
+    if _cell is not None or _beats:
+        _num = (f"第 {int(_cell) + 1} 格" if _cell is not None else "對應")
+        _desc = ("；".join(_beats)) if _beats else ""
+        board = (f"本段對應劇情分鏡圖{_num}"
+                 + (f"（{_desc}）" if _desc else "")
+                 + "，畫面構圖與情節須與該分鏡格一致。")
+    # 對應的 9 鏡位環境美術構圖：把該格編號、鏡位與場景描述帶進提示，
+    # 讓場景／取景與對應環境美術構圖一致。
+    art = ""
+    _acell = seg.get("art_cell")
+    _ashot = seg.get("art_shot") or {}
+    _aang = (_ashot.get("angle") or "").strip()
+    _aprompt = (_ashot.get("prompt") or "").strip()
+    if _acell is not None or _aang or _aprompt:
+        _anum = (f"第 {int(_acell) + 1} 格" if _acell is not None else "對應")
+        _adesc = "，".join([x for x in (_aang, _aprompt) if x])
+        art = (f"環境與取景參考 9 鏡位美術構圖{_anum}"
+               + (f"（{_adesc}）" if _adesc else "")
+               + "，場景氛圍、鏡位與光線須與該構圖一致。")
+    return (f"{scene}{board}{art}角色對嘴說出以下台詞並以對應情緒表演"
+            f"（嘴型、表情、肢體動作要吻合說話內容）：{perf}")
 
 
 # ── Background job orchestration (run inside jobs.submit threads) ──────────────
@@ -264,10 +288,47 @@ def job_generate_art_shots(task_id, params: VideoParams, style, n=9):
     return {"image": img}
 
 
+def cell_group(row_index, n_rows, n_cells):
+    """Deterministic mapping of a text-board row → its contiguous group of plot-board
+    cells (reading order). Matches generate_text_board's 'cover beats IN ORDER'
+    constraint. Returns (lo, hi, mid) as 0-based cell indices, hi exclusive; the
+    display cell numbers are lo+1 .. hi (1-based)."""
+    n_rows = max(1, int(n_rows))
+    n_cells = max(1, int(n_cells))
+    row_index = max(0, min(n_rows - 1, int(row_index)))
+    lo = row_index * n_cells // n_rows
+    hi = max(lo + 1, (row_index + 1) * n_cells // n_rows)
+    mid = min(n_cells - 1, (lo + hi - 1) // 2)
+    return lo, hi, mid
+
+
+def _annotate_text_board_cells(rows, n_cells, n_art=9):
+    """Attach the corresponding plot-board cell numbering (25-grid) AND environment
+    art-shot cell numbering (9-grid) onto each text-board row. plot cells:
+    cells (1-based list), cell_lo/cell_hi (0-based range), cell_mid (0-based rep);
+    art: art_cells (1-based list), art_cell (0-based rep)."""
+    n_cells = max(1, int(n_cells))
+    n_art = max(1, int(n_art))
+    n = max(1, len(rows))
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            continue
+        lo, hi, mid = cell_group(i, n, n_cells)
+        r["cell_lo"] = lo
+        r["cell_hi"] = hi
+        r["cell_mid"] = mid
+        r["cells"] = list(range(lo + 1, hi + 1))  # 1-based plot cell numbers
+        alo, ahi, amid = cell_group(i, n, n_art)
+        r["art_cell"] = amid
+        r["art_cells"] = list(range(alo + 1, ahi + 1))  # 1-based art panel numbers
+    return rows
+
+
 def job_generate_text_board(task_id, params: VideoParams, style, n_segments=0):
     """Detailed textual storyboard (per-segment scene / emotion / dialogue / action),
     synthesized from the plot beats + art shots + character designs. Persists
-    text_board and advances stage; the UI's '切版' step cuts it into segments."""
+    text_board and advances stage; the UI's '切版' step cuts it into segments.
+    Each row is annotated with its corresponding 25-cell plot-board cell numbers."""
     data = _load_sb(task_id)
     characters = data.get("characters", [])
     script = _script_text(task_id)
@@ -276,6 +337,7 @@ def job_generate_text_board(task_id, params: VideoParams, style, n_segments=0):
     n = int(n_segments) or len(data.get("segments", [])) or 5
     rows = llm.generate_text_board(script, characters, style=style, n_segments=n,
                                    plot_beats=beats, art_shots=art)
+    _annotate_text_board_cells(rows, len(beats) or 25, len(art) or 9)
     data = _load_sb(task_id)
     data["text_board"] = rows
     if data.get("stage") in (None, "", "artshots"):
@@ -316,11 +378,10 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
                 vdir = drama_video_prompt(s) if (s.get("dialogue_text") or "").strip() \
                     else (s.get("video_prompt") or s.get("scene") or "cinematic scene")
                 _seg_dur = int(s.get("duration") or params.video_clip_duration or 6)
-                # 參考圖優先用該段對應的 25 格分鏡格（構圖錨點），退回角色樣板；
-                # 角色外型另以文字注入，兼顧「參考分鏡圖 + 角色樣板」。
-                _board = s.get("board_image") or ""
-                _ref = _board if (_board and os.path.exists(_board)) \
-                    else (_char_ref_paths(characters, limit=1) or [""])[0]
+                # 首幀參考圖用「角色樣板圖」維持人物長相；劇情分鏡不切格，改由
+                # drama_video_prompt 以文字標號（第 X 格＋該格劇情、對應美術構圖）帶入，
+                # 讓完整分鏡圖以編號被參考，而非把切格拼圖當成影片第一幀。
+                _ref = (_char_ref_paths(characters, limit=1) or [""])[0]
                 _note = {}
                 vid = material.generate_single_video_llm(
                     task_id, vdir, VideoAspect(_aspect_value(params)),

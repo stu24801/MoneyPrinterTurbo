@@ -1688,22 +1688,27 @@ if _sb:
             with c_media:
                 _clip = seg.get("clip", "")
                 _is_veo = "llm-video-" in os.path.basename(str(_clip))
-                _board_img = seg.get("board_image", "")
-                _has_board = bool(_board_img) and os.path.exists(_board_img)
+                # 對應分鏡（不切格，用編號指向完整分鏡圖／美術構圖）
+                _bcell = seg.get("board_cell")
+                _acell = seg.get("art_cell")
+                _ashot = seg.get("art_shot") or {}
+                _corr = ""
+                if _bcell is not None:
+                    _corr += "🎞 " + tr("Corresponding plot cell") + f" #{int(_bcell) + 1}"
+                if _acell is not None:
+                    _corr += "　｜　🎨 " + tr("Corresponding art shot") + f" #{int(_acell) + 1}"
+                    if _ashot.get("angle"):
+                        _corr += f"（{_ashot.get('angle')}）"
                 if _is_veo and os.path.exists(_clip):
                     st.video(_clip)
                 elif seg.get("image") and os.path.exists(seg["image"]):
                     st.image(seg["image"], use_container_width=True)
                 elif _clip and os.path.exists(_clip):
                     st.video(_clip)
-                elif _has_board:
-                    st.image(_board_img, use_container_width=True,
-                             caption="🎞 " + tr("Corresponding plot cell"))
                 else:
                     st.caption("🖼 " + tr("No storyboard image yet"))
-                # 有影片時，另附對應的 25 格劇情分鏡格供對照（產影片會以此為構圖錨點）
-                if _has_board and _is_veo and os.path.exists(_clip):
-                    st.image(_board_img, width=140, caption="🎞 " + tr("Corresponding plot cell"))
+                if _corr:
+                    st.caption(_corr)
                 _mn = seg.get("motion_note", "")
                 if _mn == "text_fallback_policy":
                     st.warning("⚠️ " + tr("Motion image rejected"))
@@ -1732,9 +1737,11 @@ if _sb:
                             _rdesc = (seg.get("ref_desc") or "").strip()
                             _vp_full = _vp + (f"。{tr('Also include')}：{_rdesc}" if _rdesc else "")
                             _av = _aspect_val(params)
-                            # 戲劇模式優先以該段對應的 25 格分鏡格當構圖錨點（角色樣板
-                            # 另以外型文字注入），否則用該段既有靜圖。
-                            _refimg = _board_img if (_is_drama and _has_board) else (_seg_img if _has_img else "")
+                            # 戲劇模式首幀用角色樣板圖維持長相；劇情分鏡不切格，改由
+                            # drama_video_prompt 以編號（第 X 格＋描述）帶入，否則用既有靜圖。
+                            _char_ref = next((c.get("ref_image", "") for c in _sb_chars
+                                              if c.get("ref_image") and os.path.exists(c["ref_image"])), "")
+                            _refimg = _char_ref if _is_drama else (_seg_img if _has_img else "")
                             _sd = int(seg.get("duration") or params.video_clip_duration or 6)
                             jobs.submit(_sb_tid, _clip_key, "clip", (lambda uid=_uid, p=_vp_full,
                                         av=_av, md=_sd, ri=_refimg:
@@ -2157,14 +2164,18 @@ if _sb:
         # ④ 文字分鏡圖（場景／角色情緒／台詞／動作解析）→ 切版到段落
         st.markdown("#### ④ " + tr("Text board"))
         st.caption(tr("Text board hint"))
-        # 對照參考：25 格劇情分鏡圖 + 角色樣板（切版文字腳本依此對應）
+        # 對照參考（完整圖，段落以編號對應）：25 格劇情分鏡圖 ＋ 9 格環境美術構圖 ＋ 角色樣板
         _pimg_tb = _plot_board.get("image", "")
-        _tb_refs = st.columns([2, 3])
+        _aimg_tb = _art_board.get("image", "")
+        _tb_refs = st.columns([2, 2, 3])
         if _pimg_tb and os.path.exists(_pimg_tb):
-            _tb_refs[0].image(_pimg_tb, use_container_width=True, caption="25 " + tr("cells"))
+            _tb_refs[0].image(_pimg_tb, use_container_width=True, caption="🎞 25 " + tr("cells"))
+        if _aimg_tb and os.path.exists(_aimg_tb):
+            _tb_refs[1].image(_aimg_tb, use_container_width=True,
+                              caption="🎨 9 " + tr("cells"))
         _ref_chars = [c for c in _sb_chars if c.get("ref_image") and os.path.exists(c["ref_image"])]
         if _ref_chars:
-            with _tb_refs[1]:
+            with _tb_refs[2]:
                 _rcc = st.columns(len(_ref_chars))
                 for _ci, _ch in enumerate(_ref_chars):
                     _rcc[_ci].image(_ch["ref_image"], use_container_width=True,
@@ -2172,9 +2183,38 @@ if _sb:
         if not _text_board:
             st.info(tr("No text board yet"))
         _tb_changed = False
+        _ncell_disp = len(_plot_board.get("beats", []) or []) or 25
+        _nart_disp = len(_art_shots) or 9
+        _Ntb = max(1, len(_text_board))
+        # 舊版 text_board 可能沒有編號標註 → 即時補上（與切版一致），不必重產
         for _ti, _row in enumerate(_text_board):
-            with st.expander(f"🎬 {tr('Segment')} {_ti + 1}：{_row.get('scene', '')[:24]}",
+            if _row.get("cell_mid") is None:
+                _l, _h, _m = tm.cell_group(_ti, _Ntb, _ncell_disp)
+                _row["cell_lo"], _row["cell_hi"], _row["cell_mid"] = _l, _h, _m
+                _row["cells"] = list(range(_l + 1, _h + 1))
+            if _row.get("art_cell") is None:
+                _al, _ah, _am = tm.cell_group(_ti, _Ntb, _nart_disp)
+                _row["art_cell"] = _am
+                _row["art_cells"] = list(range(_al + 1, _ah + 1))
+        for _ti, _row in enumerate(_text_board):
+            _cnums = _row.get("cells") or []
+            _anums = _row.get("art_cells") or []
+            _clabel = ("#" + "–#".join(str(x) for x in (_cnums[:1] + _cnums[-1:] if len(_cnums) > 1 else _cnums))) if _cnums else ""
+            _amid = _row.get("art_cell")
+            _aangle = _art_shots[_amid].get("angle", "") if (_amid is not None and _amid < len(_art_shots)) else ""
+            _albl = ("#" + str(_anums[0])) if _anums else ""
+            with st.expander(f"🎬 {tr('Segment')} {_ti + 1}"
+                             + (f"　🎞{_clabel}" if _clabel else "")
+                             + (f"　🎨{_albl}" if _albl else "")
+                             + f"：{_row.get('scene', '')[:24]}",
                              expanded=False):
+                # 完整分鏡圖以編號對應（不切格）：標示該段對應的劇情格與美術構圖格編號
+                _corr = "🎞 " + tr("Corresponding plot cell") + f" {_clabel}"
+                if _albl:
+                    _corr += "　｜　🎨 " + tr("Corresponding art shot") + f" {_albl}"
+                    if _aangle:
+                        _corr += f"（{_aangle}）"
+                st.caption(_corr)
                 _sc = st.text_input(tr("Scene"), value=_row.get("scene", ""),
                                     key=f"tb_{_sb_tid}_{_ti}_scene")
                 _em = st.text_input("😊 " + tr("Character emotion"), value=_row.get("emotion", ""),
@@ -2199,25 +2239,31 @@ if _sb:
             st.rerun()
         if c_cut.button("✂️ " + tr("Cut into segments") + " →", key=f"cut_{_sb_tid}",
                         use_container_width=True, type="primary", disabled=not _text_board):
-            # 切版：參考文字分鏡圖填入各段落，並把每段對應的 25 格劇情分鏡格
-            # 裁切出來（seg["board_image"]）供段落顯示與產影片時當構圖錨點。
-            # 分鏡圖已由 25 格劇情分鏡圖取代，段落不再產靜圖；影片底稿走「對嘴
-            # 無人聲」Veo（參考該段分鏡格＋角色樣板），人聲後續配音補上。
-            _pimg_cut = _plot_board.get("image", "")
+            # 切版：參考文字分鏡圖填入各段落，並記錄每段對應的 25 格劇情分鏡格
+            # 與 9 格環境美術構圖「編號」（不切格，完整圖以編號被影片提示參考）。
+            # 段落不再產靜圖；影片底稿走「對嘴無人聲」Veo：首幀用角色樣板圖維持
+            # 長相，劇情/構圖以文字標號（第 X 格＋描述）帶入，人聲後續配音補上。
             _beats_cut = _plot_board.get("beats", []) or []
             _ncell = len(_beats_cut) or 25
+            _nart = len(_art_shots) or 9
             _N = max(1, len(_text_board))
             _new_segs = []
             for _ti, _row in enumerate(_text_board):
                 _base = _segments[_ti] if _ti < len(_segments) else _new_segment()
                 _ms = next((ln["line"] for ln in voice.parse_dialogue_lines(_row.get("dialogue", ""))
                             if ln.get("line")), "")
-                # 該段對應的分鏡格範圍（依閱讀順序平均切分 25 格）
-                _lo = _ti * _ncell // _N
-                _hi = max(_lo + 1, (_ti + 1) * _ncell // _N)
-                _mid = min(_ncell - 1, (_lo + _hi - 1) // 2)
-                _bimg = tm._crop_plot_cell(_sb_tid, _pimg_cut, _mid,
-                                           f"seg-board-{_base['uid']}.png") if _pimg_cut else ""
+                # 對應的分鏡格編號：優先用 text_board 已標註的編號，否則依序平均計算。
+                # 不再裁切格子；完整分鏡圖以「編號＋該格劇情描述」被影片提示參考。
+                _lo = _row.get("cell_lo")
+                _hi = _row.get("cell_hi")
+                _mid = _row.get("cell_mid")
+                if _lo is None or _hi is None or _mid is None:
+                    _lo, _hi, _mid = tm.cell_group(_ti, _N, _ncell)
+                # 對應的 9 鏡位環境美術構圖格編號
+                _amid = _row.get("art_cell")
+                if _amid is None:
+                    _amid = tm.cell_group(_ti, _N, _nart)[2]
+                _ashot = _art_shots[_amid] if 0 <= _amid < len(_art_shots) else {}
                 _base.update({
                     "scene": _row.get("scene", ""),
                     "dialogue_text": _row.get("dialogue", ""),
@@ -2225,9 +2271,12 @@ if _sb:
                     "must_say": _ms,
                     "script_chunk": "",
                     "image": "",
-                    "board_image": _bimg,
+                    "board_image": "",
                     "board_beats": _beats_cut[_lo:_hi],
                     "board_cell": _mid,
+                    "art_cell": _amid,
+                    "art_shot": {"angle": _ashot.get("angle", ""),
+                                 "prompt": _ashot.get("prompt", "")},
                 })
                 _new_segs.append(_base)
             _segments = _new_segs
