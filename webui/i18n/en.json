@@ -283,6 +283,7 @@
         "Tick segments to re-render": "Tick segments to re-render (multi-select, one click)",
         "Select for clip re-gen": "Select for clip re-gen",
         "Generate selected clips": "Generate selected clips",
-        "Tick segments for clip re-gen": "Tick segments to (re)generate their material clip (multi-select)"
+        "Tick segments for clip re-gen": "Tick segments to (re)generate their material clip (multi-select)",
+        "Download video": "Download video"
     }
 }

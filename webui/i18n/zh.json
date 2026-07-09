@@ -284,6 +284,7 @@
         "Tick segments to re-render": "勾选要重新产制的段落，可多选一次产",
         "Select for clip re-gen": "勾选重制素材",
         "Generate selected clips": "产制选取素材影片",
-        "Tick segments for clip re-gen": "勾选要重新产制素材影片的段落，可多选一次产"
+        "Tick segments for clip re-gen": "勾选要重新产制素材影片的段落，可多选一次产",
+        "Download video": "下载影片"
     }
 }

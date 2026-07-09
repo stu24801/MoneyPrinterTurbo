@@ -1485,6 +1485,12 @@ if _sb:
             for v in (_batch.get("result", {}) or {}).get("videos", []):
                 if os.path.exists(v):
                     st.video(v)
+                    with open(v, "rb") as _vf:
+                        st.download_button(
+                            "⬇️ " + tr("Download video"), _vf.read(),
+                            file_name=os.path.basename(v), mime="video/mp4",
+                            use_container_width=True, type="primary",
+                            key=f"dl_merge_{os.path.basename(v)}")
             jobs.clear(_sb_tid, _batch_key)
             if st.button("↩️ " + tr("Leave to other projects"), key="merge_done_leave",
                          use_container_width=True):
@@ -2415,7 +2421,13 @@ if _open_pid:
     if _finals:
         st.caption("🎬 " + tr("Video Generation Completed"))
         for _f in _finals[:2]:
-            st.video(os.path.join(_pdir, _f))
+            _fp = os.path.join(_pdir, _f)
+            st.video(_fp)
+            with open(_fp, "rb") as _vf:
+                st.download_button(
+                    "⬇️ " + tr("Download video"), _vf.read(),
+                    file_name=_f, mime="video/mp4", use_container_width=True,
+                    type="primary", key=f"dl_proj_{_open_pid}_{_f}")
     _seg_vids = sorted((f for f in os.listdir(_pdir) if re.match(r"segment-\d+\.mp4$", f)),
                        key=lambda x: int(re.search(r"\d+", x).group()))
     if _seg_vids:
