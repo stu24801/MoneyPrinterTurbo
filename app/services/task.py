@@ -143,6 +143,45 @@ def drama_video_prompt(seg):
             f"（嘴型、表情、肢體動作要吻合說話內容）：{perf}")
 
 
+def _seg_character_refs(seg, characters, limit=4):
+    """Model-sheet paths for the characters SPEAKING in this segment (fallback: all),
+    so a per-segment still can lock exactly those characters to their finalized
+    design — not just the first character's sheet (which left other characters
+    off-model)."""
+    names = {ln["speaker"] for ln in voice.parse_dialogue_lines(
+        seg.get("dialogue_text", "") or "") if ln.get("speaker")}
+    present = [c for c in (characters or []) if c.get("name") in names] or (characters or [])
+    return [c["ref_image"] for c in present
+            if c.get("ref_image") and os.path.exists(c["ref_image"])][:limit]
+
+
+def drama_still_prompt(seg):
+    """A STILL (first-frame) description of the segment's scene with its characters —
+    scene + action + the corresponding plot-cell composition, WITHOUT the lip-sync
+    performance (that belongs to the video prompt)."""
+    parts = [x for x in (seg.get("scene", ""), seg.get("video_prompt", "")) if x]
+    base = "。".join(parts)
+    cells = seg.get("board_cells") or []
+    beats = [b for b in (seg.get("board_beats") or []) if b]
+    if cells and beats:
+        detail = "、".join(f"第 {n} 格「{b}」" for n, b in zip(cells, beats) if b)
+        base += f"。構圖參考劇情分鏡{detail}"
+    return (base or "cinematic scene") + "。人物長相須嚴格符合角色設定圖。"
+
+
+def _drama_scene_still(task_id, aspect_value, seg, characters, style):
+    """Generate a per-segment scene STILL with the segment's characters locked to
+    their model sheets (reference_images), so the video's first frame is the SCENE
+    (not a neutral model sheet) and the characters stay on their finalized design.
+    Returns the still path or ""."""
+    refs = _seg_character_refs(seg, characters)
+    uid = seg.get("uid", 0)
+    return material.generate_single_image_llm(
+        task_id, drama_still_prompt(seg), VideoAspect(aspect_value),
+        index=f"still-{uid}", style=style, reference_images=refs,
+        appearance=_seg_appearance(seg, characters), out_name=f"seg-still-{uid}.png")
+
+
 # ── Background job orchestration (run inside jobs.submit threads) ──────────────
 def job_generate_image(task_id, uid, prompt, aspect_value, style, appearance, ref_images):
     """Generate one segment's storyboard image and persist it by uid."""
@@ -175,11 +214,20 @@ def job_generate_clip(task_id, uid, prompt, aspect_value, max_dur, style, refere
     # 戲劇模式：帶入該段角色外型，讓生成人物符合設定參照（尤其圖被拒改
     # text-to-video 時，無參考圖全靠文字，更需要外型描述維持一致）
     _sb = _load_sb(task_id)
+    characters = _sb.get("characters", [])
     _seg = next((x for x in _sb.get("segments", []) if x.get("uid") == uid), {})
-    _appear = _seg_appearance(_seg, _sb.get("characters", []))
+    _appear = _seg_appearance(_seg, characters)
+    # 戲劇模式且未帶參考圖 → 先產「該場景＋定稿人物」分鏡靜圖當首幀（鎖定角色樣板，
+    # 避免影片首幀變成中性樣板圖、且人物維持定稿長相）。
+    _ref = reference_image or ""
+    _still = ""
+    _is_drama_seg = bool(characters) or bool((_seg.get("dialogue_text") or "").strip())
+    if not _ref and _is_drama_seg:
+        _still = _drama_scene_still(task_id, aspect_value, _seg, characters, style)
+        _ref = _still or ""
     vid = material.generate_single_video_llm(
         task_id, prompt, aspect, max_clip_duration=max_dur, index=uid,
-        style=style, reference_image=reference_image or "", note_out=_note,
+        style=style, reference_image=_ref, note_out=_note,
         appearance=_appear)
     if not vid:
         raise RuntimeError("video generation returned empty")
@@ -188,6 +236,8 @@ def job_generate_clip(task_id, uid, prompt, aspect_value, max_dur, style, refere
         if s.get("uid") == uid:
             s["clip"] = vid
             s["video_prompt"] = prompt
+            if _still:
+                s["still"] = _still
             s["motion_note"] = _note.get("motion", "")
             break
     _save_sb(task_id, data)
@@ -481,11 +531,12 @@ def purge_segment_media(task_id, seg, drop=False):
     drop=True (the segment is being removed entirely)."""
     tdir = os.path.abspath(utils.task_dir(task_id))
     uid = seg.get("uid")
-    targets = [seg.get("clip"), seg.get("segment_video"), seg.get("bridge_clip")]
+    targets = [seg.get("clip"), seg.get("segment_video"), seg.get("bridge_clip"),
+               seg.get("still")]
     if uid is not None:
         targets += [os.path.join(tdir, n) for n in (
-            f"llm-video-{uid}.mp4", f"bridge-{uid}.mp4", f"bridge-{uid}-audio.mp3",
-            f"bridge-{uid}.srt", f"bridge-{uid}-sub.mp3")]
+            f"llm-video-{uid}.mp4", f"seg-still-{uid}.png", f"bridge-{uid}.mp4",
+            f"bridge-{uid}-audio.mp3", f"bridge-{uid}.srt", f"bridge-{uid}-sub.mp3")]
     for p in targets:
         try:
             if p and os.path.isfile(p) and os.path.abspath(p).startswith(tdir):
@@ -494,7 +545,7 @@ def purge_segment_media(task_id, seg, drop=False):
             pass
     if not drop:
         for k in ("clip", "segment_video", "bridge_clip", "bridge_narration",
-                  "rendered_sig", "motion_note"):
+                  "still", "rendered_sig", "motion_note"):
             seg.pop(k, None)
 
 
@@ -524,25 +575,26 @@ def job_render_segments(task_id, params: VideoParams, voice_map, seg_inputs,
             _has_image = _image and os.path.exists(_image)
             if not _has_clip and not _has_image and _drama:
                 # 戲劇新流程：段落分鏡圖已由 25 格劇情分鏡圖取代，不再產靜圖。
-                # 直接產出「只出台詞對嘴、無人聲」的 Veo 影片底稿（人聲後續配音補上），
-                # 以角色參考圖 + 外型維持一致長相。
-                jobs.update_progress(task_id, "batch", pos, total, f"segment {idx + 1} · clip")
+                # 直接產出「只出台詞對嘴、無人聲」的 Veo 影片底稿（人聲後續配音補上）。
+                jobs.update_progress(task_id, "batch", pos, total, f"segment {idx + 1} · still")
                 vdir = drama_video_prompt(s) if (s.get("dialogue_text") or "").strip() \
                     else (s.get("video_prompt") or s.get("scene") or "cinematic scene")
                 _seg_dur = int(s.get("duration") or params.video_clip_duration or 6)
-                # 首幀參考圖用「角色樣板圖」維持人物長相；劇情分鏡不切格，改由
-                # drama_video_prompt 以文字標號（第 X 格＋該格劇情、對應美術構圖）帶入，
-                # 讓完整分鏡圖以編號被參考，而非把切格拼圖當成影片第一幀。
-                _ref = (_char_ref_paths(characters, limit=1) or [""])[0]
+                # 先用「該段說話角色的樣板圖」為參考，產出該場景的分鏡靜圖（人物鎖定
+                # 定稿長相），再以此靜圖做 image-to-video → 影片首幀是場景（非中性樣板
+                # 圖），且人物維持角色設定。修掉舊版只傳第一個角色樣板→其他角色跑掉。
+                _still = _drama_scene_still(task_id, _aspect_value(params), s, characters, style)
+                jobs.update_progress(task_id, "batch", pos, total, f"segment {idx + 1} · clip")
                 _note = {}
                 vid = material.generate_single_video_llm(
                     task_id, vdir, VideoAspect(_aspect_value(params)),
                     max_clip_duration=_seg_dur, index=s.get("uid", idx),
-                    style=style, reference_image=_ref,
+                    style=style, reference_image=_still or "",
                     note_out=_note, appearance=_seg_appearance(s, characters))
                 if vid:
                     data = _load_sb(task_id)
                     segs = data.get("segments", [])
+                    segs[idx]["still"] = _still or ""
                     segs[idx]["clip"] = vid
                     segs[idx]["motion_note"] = _note.get("motion", "")
                     inp["clip"] = vid

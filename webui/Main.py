@@ -1743,11 +1743,10 @@ if _sb:
                             _rdesc = (seg.get("ref_desc") or "").strip()
                             _vp_full = _vp + (f"。{tr('Also include')}：{_rdesc}" if _rdesc else "")
                             _av = _aspect_val(params)
-                            # 戲劇模式首幀用角色樣板圖維持長相；劇情分鏡不切格，改由
-                            # drama_video_prompt 以編號（第 X 格＋描述）帶入，否則用既有靜圖。
-                            _char_ref = next((c.get("ref_image", "") for c in _sb_chars
-                                              if c.get("ref_image") and os.path.exists(c["ref_image"])), "")
-                            _refimg = _char_ref if _is_drama else (_seg_img if _has_img else "")
+                            # 戲劇模式傳空參考圖 → job_generate_clip 會先用該段角色樣板圖產
+                            # 「該場景＋定稿人物」分鏡靜圖當首幀（鎖定角色、首幀為場景非樣板
+                            # 圖）。非戲劇才用既有靜圖做 image-to-video。
+                            _refimg = "" if _is_drama else (_seg_img if _has_img else "")
                             _sd = int(seg.get("duration") or params.video_clip_duration or 6)
                             jobs.submit(_sb_tid, _clip_key, "clip", (lambda uid=_uid, p=_vp_full,
                                         av=_av, md=_sd, ri=_refimg:
