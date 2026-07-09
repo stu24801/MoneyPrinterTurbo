@@ -108,24 +108,18 @@ def drama_video_prompt(seg):
     scene = (base + "。") if base else ""
     # 對應的 25 格劇情分鏡格：把該格編號與劇情描述帶進提示，讓構圖／情節
     # 與對應分鏡格一致（board_image 已作為視覺錨點，這裡再以文字強化）。
-    # 劇情分鏡（不切圖，用「標號＋逐格詳細說明」讓 Veo 有效參照）：把該段對應的
-    # 25 格劇情分鏡格逐格列出「第 X 格「該格劇情」」，要求依序完整呈現、構圖情節一致。
+    # 劇情要點：把該段劇情以「有序要點」帶入讓 Veo 有效參照。注意：用「劇情要點」
+    # 而非「分鏡格/storyboard cell」，否則 Veo 會把畫面畫成多格分鏡表（分格首幀）。
     board = ""
     _cells = seg.get("board_cells") or []
     _beats = [b for b in (seg.get("board_beats") or []) if b]
     _cell = seg.get("board_cell")
-    if _cells and _beats:
-        _pairs = list(zip(_cells, _beats))
-        _detail = "、".join(f"第 {n} 格「{b}」" for n, b in _pairs if b)
-        _rng = (f"第 {_cells[0]}～{_cells[-1]} 格" if len(_cells) > 1 else f"第 {_cells[0]} 格")
-        board = (f"本段對應 25 格劇情分鏡圖的{_rng}，須依序完整呈現以下分鏡內容：{_detail}。"
-                 f"畫面構圖、場景、人物動作與情節走向務必與這些分鏡格逐格吻合。")
-    elif _cell is not None or _beats:
-        _num = (f"第 {int(_cell) + 1} 格" if _cell is not None else "對應")
-        _desc = ("；".join(_beats)) if _beats else ""
-        board = (f"本段對應劇情分鏡圖{_num}"
-                 + (f"（{_desc}）" if _desc else "")
-                 + "，畫面構圖與情節須與該分鏡格一致。")
+    if _beats:
+        _detail = "、".join(f"{i + 1}.「{b}」" for i, b in enumerate(_beats))
+        board = (f"本段依序演出以下劇情要點：{_detail}。以單一連續的實拍電影鏡頭呈現，"
+                 f"畫面禁止出現分鏡表、多格/九宮格、分割畫面或格線邊框。")
+    elif _cell is not None:
+        board = "以單一連續的實拍電影鏡頭呈現，畫面禁止出現分鏡表、多格拼貼或分割畫面。"
     # 對應的 9 鏡位環境美術構圖：把該格編號、鏡位與場景描述帶進提示，
     # 讓場景／取景與對應環境美術構圖一致。
     art = ""
@@ -133,12 +127,9 @@ def drama_video_prompt(seg):
     _ashot = seg.get("art_shot") or {}
     _aang = (_ashot.get("angle") or "").strip()
     _aprompt = (_ashot.get("prompt") or "").strip()
-    if _acell is not None or _aang or _aprompt:
-        _anum = (f"第 {int(_acell) + 1} 格" if _acell is not None else "對應")
+    if _aang or _aprompt:
         _adesc = "，".join([x for x in (_aang, _aprompt) if x])
-        art = (f"環境與取景參考 9 鏡位美術構圖{_anum}"
-               + (f"（{_adesc}）" if _adesc else "")
-               + "，場景氛圍、鏡位與光線須與該構圖一致。")
+        art = f"環境、取景與光線：{_adesc}。"
     return (f"{scene}{board}{art}角色對嘴說出以下台詞並以對應情緒表演"
             f"（嘴型、表情、肢體動作要吻合說話內容）：{perf}")
 
@@ -156,17 +147,19 @@ def _seg_character_refs(seg, characters, limit=4):
 
 
 def drama_still_prompt(seg):
-    """A STILL (first-frame) description of the segment's scene with its characters —
-    scene + action + the corresponding plot-cell composition, WITHOUT the lip-sync
-    performance (that belongs to the video prompt)."""
+    """A STILL (first-frame) description of the segment's scene with its characters.
+    IMPORTANT: describe the plot beats as SCENE CONTENT only — never as 'storyboard
+    cells / 分鏡格 / grid', or the image model draws a multi-panel storyboard sheet
+    (which then becomes a paneled first frame). Force a single cinematic frame."""
     parts = [x for x in (seg.get("scene", ""), seg.get("video_prompt", "")) if x]
     base = "。".join(parts)
-    cells = seg.get("board_cells") or []
     beats = [b for b in (seg.get("board_beats") or []) if b]
-    if cells and beats:
-        detail = "、".join(f"第 {n} 格「{b}」" for n, b in zip(cells, beats) if b)
-        base += f"。構圖參考劇情分鏡{detail}"
-    return (base or "cinematic scene") + "。人物長相須嚴格符合角色設定圖。"
+    if beats:
+        base += "。畫面內容：" + "，".join(beats)
+    return ("一張單一鏡頭、實拍電影感的完整畫面：" + (base or "cinematic scene")
+            + "。人物長相須嚴格符合角色設定圖。"
+            + "務必是單一連續的實拍畫面，禁止分鏡表、禁止多格/九宮格/漫畫分格、"
+              "禁止分割畫面或畫面內出現格線邊框。")
 
 
 def _drama_scene_still(task_id, aspect_value, seg, characters, style):
@@ -242,6 +235,48 @@ def job_generate_clip(task_id, uid, prompt, aspect_value, max_dur, style, refere
             break
     _save_sb(task_id, data)
     return {"clip": vid, "uid": uid}
+
+
+def job_generate_clips_batch(task_id, params: VideoParams, indices, style):
+    """Regenerate only the Veo MATERIAL clip (not the composed segment video) for
+    each selected segment, in ONE background job — so multiple segments can be
+    re-generated with a single click instead of one-at-a-time. Drama segments get a
+    fresh scene still (characters locked to their sheets) as the first frame."""
+    total = len(indices)
+    done = 0
+    _sb0 = _load_sb(task_id)
+    characters = _sb0.get("characters", [])
+    for pos, idx in enumerate(indices):
+        data = _load_sb(task_id)
+        segs = data.get("segments", [])
+        if not (0 <= idx < len(segs)):
+            continue
+        s = segs[idx]
+        jobs.update_progress(task_id, "batch", pos, total, f"segment {idx + 1} · still")
+        _still = _drama_scene_still(task_id, _aspect_value(params), s, characters, style)
+        jobs.update_progress(task_id, "batch", pos, total, f"segment {idx + 1} · clip")
+        vdir = drama_video_prompt(s) if (s.get("dialogue_text") or "").strip() \
+            else (s.get("video_prompt") or s.get("scene") or "cinematic scene")
+        _seg_dur = int(s.get("duration") or params.video_clip_duration or 6)
+        _note = {}
+        vid = material.generate_single_video_llm(
+            task_id, vdir, VideoAspect(_aspect_value(params)),
+            max_clip_duration=_seg_dur, index=s.get("uid", idx), style=style,
+            reference_image=_still or "", note_out=_note,
+            appearance=_seg_appearance(s, characters))
+        if vid:
+            data = _load_sb(task_id)
+            segs = data.get("segments", [])
+            segs[idx]["clip"] = vid
+            segs[idx]["still"] = _still or ""
+            segs[idx]["motion_note"] = _note.get("motion", "")
+            # clip 換了 → 舊的合成段落影片過期，清掉讓後續 Render 會重新合成
+            segs[idx].pop("segment_video", None)
+            segs[idx].pop("rendered_sig", None)
+            _save_sb(task_id, data)
+            done += 1
+        jobs.update_progress(task_id, "batch", pos + 1, total, f"segment {idx + 1}")
+    return {"clips": done, "total": total}
 
 
 def _script_text(task_id):

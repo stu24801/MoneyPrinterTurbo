@@ -280,6 +280,9 @@
         "Select for re-render": "Select for re-render",
         "Re-render selected": "Re-render selected",
         "Selected": "Selected",
-        "Tick segments to re-render": "Tick segments to re-render (multi-select, one click)"
+        "Tick segments to re-render": "Tick segments to re-render (multi-select, one click)",
+        "Select for clip re-gen": "Select for clip re-gen",
+        "Generate selected clips": "Generate selected clips",
+        "Tick segments for clip re-gen": "Tick segments to (re)generate their material clip (multi-select)"
     }
 }

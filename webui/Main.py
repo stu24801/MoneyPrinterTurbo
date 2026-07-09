@@ -1657,6 +1657,7 @@ if _sb:
             if _total_est > _target * 1.2:
                 _dur_msg += f"　⚠️ {tr('Over target hint')}"
         st.caption(_dur_msg)
+        _sel_clips = []  # 勾選要（重新）產製素材影片的段落 index，可多選一次批次產
         for i, seg in enumerate(_segments):
             _uid = seg.get("uid", str(i))
             _hdr_l, _hdr_ins, _hdr_r = st.columns([4, 1, 1])
@@ -1724,6 +1725,10 @@ if _sb:
                     st.error("❌ " + tr("Motion failed"))
                 _seg_img = seg.get("image", "")
                 _has_img = bool(_seg_img) and os.path.exists(_seg_img)
+                # 勾選以批次（重新）產製此段素材影片（可多選、一次產）
+                if st.checkbox("🎞 " + tr("Select for clip re-gen"),
+                               key=f"selclip_{_sb_tid}_{_uid}", disabled=_clip_running):
+                    _sel_clips.append(i)
                 # ── Veo 影片按鈕 / 狀態 ──
                 if _clip_running:
                     st.info("🎥 " + tr("Generating Segment Clip") + " …")
@@ -1887,6 +1892,20 @@ if _sb:
         _save_storyboard_data(_sb_tid, _sb_style, _segments)
 
         st.info(tr("Storyboard Hint"))
+
+        # 批次（重新）產製選取段落的素材影片（Veo clip），一次送出、依序產，免點一個等一個
+        _clip_busy = any((k.startswith("img:") or k.startswith("clip:") or k == "batch")
+                         and s.get("status") == "running" for k, s in _all_jobs.items())
+        _cc1, _cc2 = st.columns([3, 1])
+        _cc1.caption(("✅ " + tr("Selected") + f"：{len(_sel_clips)}") if _sel_clips
+                     else ("ℹ️ " + tr("Tick segments for clip re-gen")))
+        if _cc2.button("🎞 " + tr("Generate selected clips"), use_container_width=True,
+                       type="primary", disabled=(not _sel_clips) or _clip_busy):
+            jobs.submit(_sb_tid, "batch", "segments",
+                        (lambda idxs=list(_sel_clips):
+                            tm.job_generate_clips_batch(_sb_tid, params, idxs, _sb_style)),
+                        total=len(_sel_clips))
+            st.rerun()
 
         # 沒有任何素材（圖/影片）的段落 → 產生分段影片時會自動補產分鏡圖
         _no_material = sum(1 for s in _segments
