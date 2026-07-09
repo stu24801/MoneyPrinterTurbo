@@ -1919,14 +1919,20 @@ if _sb:
                         and s.get("status") == "running" for k, s in _all_jobs.items())
         if _seg_busy:
             st.caption("⏳ " + tr("Wait for segment jobs before rendering"))
-        c_ok, c_save, c_discard = st.columns(3)
+        c_ok, c_regen, c_save, c_discard = st.columns(4)
         if c_save.button("💾 " + tr("Save & continue later"), use_container_width=True):
             _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="board")
             st.session_state.pop("storyboard", None)
             st.toast("💾 " + tr("Progress saved"))
             st.rerun()
-        if c_ok.button("🎬 " + tr("Render Segments"), use_container_width=True, type="primary",
-                       disabled=_seg_busy):
+        _render_clicked = c_ok.button("🎬 " + tr("Render Segments"), use_container_width=True,
+                                      type="primary", disabled=_seg_busy)
+        # 全部重新產製：略過沿用判斷、清掉所有段落舊影片/靜圖，強制每段重生
+        _regen_clicked = c_regen.button("🔄 " + tr("Regenerate all segments"),
+                                        use_container_width=True, disabled=_seg_busy,
+                                        help=tr("Regenerate all segments help"))
+        if _render_clicked or _regen_clicked:
+            _force_all = _regen_clicked
             _appended = []
             for i, seg in enumerate(_segments):
                 _chunk = (seg.get("script_chunk") or "").strip()
@@ -1943,13 +1949,14 @@ if _sb:
                 # 啟用自動動態化時，只有靜態圖(無 Veo clip)的段落要強制重製成動態
                 _force_motion = _auto_motion and not _has_clip and \
                     bool(s.get("image")) and os.path.exists(s.get("image", ""))
-                if _sv and os.path.exists(_sv) and s.get("rendered_sig") == _seg_sig(s) \
-                        and not _force_motion:
+                if not _force_all and _sv and os.path.exists(_sv) \
+                        and s.get("rendered_sig") == _seg_sig(s) and not _force_motion:
                     _reused += 1
                     continue  # 未修改且已渲染 → 直接沿用
-                # 內容自上次渲染後已變更（曾渲染過但簽章不符）→ 舊 Veo clip 已過期，
-                # 清掉讓其重產新片（保護尚未渲染過的手動 clip：無 rendered_sig 不動）
-                if _is_drama and s.get("rendered_sig") and s.get("rendered_sig") != _seg_sig(s):
+                # 全部重新產製，或內容自上次渲染後已變更 → 清掉舊 Veo clip／靜圖／段落影片
+                # 讓其重產新片。（非強制模式下，保護尚未渲染過的手動 clip：無 rendered_sig 不動）
+                if _is_drama and (_force_all or (s.get("rendered_sig")
+                                                 and s.get("rendered_sig") != _seg_sig(s))):
                     tm.purge_segment_media(_sb_tid, s)
                 _seg_inputs.append({"clip": s.get("clip"), "image": s.get("image"),
                                     "script_chunk": s.get("script_chunk"),

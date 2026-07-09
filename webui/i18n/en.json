@@ -274,6 +274,8 @@
         "Script": "Script",
         "fits": "fits",
         "Detailed plot breakdown": "Detailed plot breakdown",
-        "will split into": "will split into"
+        "will split into": "will split into",
+        "Regenerate all segments": "Regenerate all",
+        "Regenerate all segments help": "Skip reuse: purge every segment's old clip/still and force-regenerate all (re-runs Veo, slower)"
     }
 }

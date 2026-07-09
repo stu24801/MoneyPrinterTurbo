@@ -275,6 +275,8 @@
         "Script": "腳本",
         "fits": "符合",
         "Detailed plot breakdown": "詳細劇情分鏡",
-        "will split into": "切版時將切分為"
+        "will split into": "切版時將切分為",
+        "Regenerate all segments": "全部重新產製",
+        "Regenerate all segments help": "略過沿用，清掉所有段落舊影片/靜圖並強制每段重新產製（會重跑 Veo，較花時間）"
     }
 }
