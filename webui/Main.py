@@ -1690,11 +1690,17 @@ if _sb:
                 _is_veo = "llm-video-" in os.path.basename(str(_clip))
                 # 對應分鏡（不切格，用編號指向完整分鏡圖／美術構圖）
                 _bcell = seg.get("board_cell")
+                _bcells = seg.get("board_cells") or []
                 _acell = seg.get("art_cell")
                 _ashot = seg.get("art_shot") or {}
                 _corr = ""
-                if _bcell is not None:
+                if _bcells:
+                    _blbl = (f"#{_bcells[0]}–#{_bcells[-1]}" if len(_bcells) > 1 else f"#{_bcells[0]}")
+                    _corr += "🎞 " + tr("Corresponding plot cell") + f" {_blbl}"
+                elif _bcell is not None:
                     _corr += "🎞 " + tr("Corresponding plot cell") + f" #{int(_bcell) + 1}"
+                if _dur := seg.get("duration"):
+                    _corr += f"　⏱ {_dur}s"
                 if _acell is not None:
                     _corr += "　｜　🎨 " + tr("Corresponding art shot") + f" #{int(_acell) + 1}"
                     if _ashot.get("angle"):
@@ -2255,48 +2261,58 @@ if _sb:
             _ncell = len(_beats_cut) or 25
             _nart = len(_art_shots) or 9
             _N = max(1, len(_text_board))
-            # 重新切版＝重新產製：段數變少時，多出來的舊段落連同已產製影片一併移除
-            _old_segments = _segments
-            for _extra in _old_segments[len(_text_board):]:
-                tm.purge_segment_media(_sb_tid, _extra, drop=True)
+            _max_dur = 8  # Veo 單片可產製上限（秒）
+            # 重新切版＝重新產製：uid 會重配，先移除所有舊段落的已產製影片避免孤兒
+            for _old in _segments:
+                tm.purge_segment_media(_sb_tid, _old, drop=True)
             _new_segs = []
             for _ti, _row in enumerate(_text_board):
-                _base = _old_segments[_ti] if _ti < len(_old_segments) else _new_segment()
-                # 沿用的舊段落先清掉舊 Veo clip／段落影片／串場（避免重切後仍用到舊內容）
-                tm.purge_segment_media(_sb_tid, _base)
-                _ms = next((ln["line"] for ln in voice.parse_dialogue_lines(_row.get("dialogue", ""))
-                            if ln.get("line")), "")
-                # 對應的分鏡格編號：優先用 text_board 已標註的編號，否則依序平均計算。
-                # 不再裁切格子；完整分鏡圖以「編號＋該格劇情描述」被影片提示參考。
+                # 對應的劇情分鏡格範圍（優先用 text_board 標註編號，否則平均計算）
                 _lo = _row.get("cell_lo")
                 _hi = _row.get("cell_hi")
-                _mid = _row.get("cell_mid")
-                if _lo is None or _hi is None or _mid is None:
-                    _lo, _hi, _mid = tm.cell_group(_ti, _N, _ncell)
+                if _lo is None or _hi is None:
+                    _lo, _hi, _ = tm.cell_group(_ti, _N, _ncell)
                 # 對應的 9 鏡位環境美術構圖格編號
                 _amid = _row.get("art_cell")
                 if _amid is None:
                     _amid = tm.cell_group(_ti, _N, _nart)[2]
                 _ashot = _art_shots[_amid] if 0 <= _amid < len(_art_shots) else {}
-                _base.update({
-                    "scene": _row.get("scene", ""),
-                    "dialogue_text": _row.get("dialogue", ""),
-                    "video_prompt": _row.get("action", "") or _row.get("scene", ""),
-                    "must_say": _ms,
-                    "script_chunk": "",
-                    "image": "",
-                    "board_image": "",
-                    "board_beats": _beats_cut[_lo:_hi],
-                    "board_cell": _mid,
-                    "art_cell": _amid,
-                    "art_shot": {"angle": _ashot.get("angle", ""),
-                                 "prompt": _ashot.get("prompt", "")},
-                })
-                _new_segs.append(_base)
+                # 依可產製長度切分台詞：每段腳本不長於 Veo 上限，超過就切成多段
+                _chunks = tm.split_dialogue_by_duration(_row.get("dialogue", ""),
+                                                        max_seconds=_max_dur)
+                _K = max(1, len(_chunks))
+                for _j, _chunk in enumerate(_chunks):
+                    # 把該列的劇情格範圍平均分配給子段，讓每個子段對應更細的分鏡格
+                    _slo = _lo + _j * (_hi - _lo) // _K
+                    _shi = min(_hi, max(_slo + 1, _lo + (_j + 1) * (_hi - _lo) // _K))
+                    _smid = min(_ncell - 1, (_slo + _shi - 1) // 2)
+                    _ms = next((ln["line"] for ln in voice.parse_dialogue_lines(_chunk)
+                                if ln.get("line")), "")
+                    _dur = tm.snap_duration(tm.estimate_speech_seconds(_chunk) or 1)
+                    _seg = _new_segment()
+                    _seg.update({
+                        "scene": _row.get("scene", ""),
+                        "dialogue_text": _chunk,
+                        "video_prompt": _row.get("action", "") or _row.get("scene", ""),
+                        "must_say": _ms,
+                        "script_chunk": "",
+                        "image": "",
+                        "board_image": "",
+                        "board_beats": _beats_cut[_slo:_shi],
+                        "board_cell": _smid,
+                        "board_cells": list(range(_slo + 1, _shi + 1)),
+                        "art_cell": _amid,
+                        "art_shot": {"angle": _ashot.get("angle", ""),
+                                     "prompt": _ashot.get("prompt", "")},
+                        "duration": _dur,
+                    })
+                    _new_segs.append(_seg)
             _segments = _new_segs
             _save_storyboard_data(_sb_tid, _sb_style, _segments, stage="board")
             st.session_state["storyboard"]["stage"] = "board"
-            st.toast("✂️ " + tr("Cut done"))
+            _split_extra = len(_new_segs) - len(_text_board)
+            st.toast("✂️ " + tr("Cut done") + f"：{len(_new_segs)} "
+                     + tr("segments") + (f"（+{_split_extra} 切分）" if _split_extra > 0 else ""))
             st.rerun()
 
 

@@ -108,10 +108,19 @@ def drama_video_prompt(seg):
     scene = (base + "。") if base else ""
     # 對應的 25 格劇情分鏡格：把該格編號與劇情描述帶進提示，讓構圖／情節
     # 與對應分鏡格一致（board_image 已作為視覺錨點，這裡再以文字強化）。
+    # 劇情分鏡（不切圖，用「標號＋逐格詳細說明」讓 Veo 有效參照）：把該段對應的
+    # 25 格劇情分鏡格逐格列出「第 X 格「該格劇情」」，要求依序完整呈現、構圖情節一致。
     board = ""
-    _cell = seg.get("board_cell")
+    _cells = seg.get("board_cells") or []
     _beats = [b for b in (seg.get("board_beats") or []) if b]
-    if _cell is not None or _beats:
+    _cell = seg.get("board_cell")
+    if _cells and _beats:
+        _pairs = list(zip(_cells, _beats))
+        _detail = "、".join(f"第 {n} 格「{b}」" for n, b in _pairs if b)
+        _rng = (f"第 {_cells[0]}～{_cells[-1]} 格" if len(_cells) > 1 else f"第 {_cells[0]} 格")
+        board = (f"本段對應 25 格劇情分鏡圖的{_rng}，須依序完整呈現以下分鏡內容：{_detail}。"
+                 f"畫面構圖、場景、人物動作與情節走向務必與這些分鏡格逐格吻合。")
+    elif _cell is not None or _beats:
         _num = (f"第 {int(_cell) + 1} 格" if _cell is not None else "對應")
         _desc = ("；".join(_beats)) if _beats else ""
         board = (f"本段對應劇情分鏡圖{_num}"
@@ -344,6 +353,91 @@ def job_generate_text_board(task_id, params: VideoParams, style, n_segments=0):
         data["stage"] = "textboard"
     _save_sb(task_id, data)
     return {"rows": len(rows)}
+
+
+_CJK_CPS = 4.0  # 中文旁白/台詞語速 ~4 字/秒（與 script 時長估算一致）
+
+
+def estimate_speech_seconds(dialogue_text, cps=_CJK_CPS):
+    """Rough spoken duration of a drama dialogue block: sum of the spoken 台詞
+    lengths / chars-per-second (CJK ~4). Only the line content counts (not the
+    角色名（情感） prefix)."""
+    lines = voice.parse_dialogue_lines(dialogue_text or "")
+    chars = sum(len((ln.get("line") or "").strip()) for ln in lines)
+    if not chars:
+        chars = len((dialogue_text or "").strip())
+    return chars / max(1.0, cps)
+
+
+def _split_line_by_punct(text, max_chars):
+    """Split one over-long utterance into <=max_chars pieces at sentence
+    punctuation (fallback: hard slice)."""
+    import re as _re
+    parts, buf = [], ""
+    for tok in _re.findall(r"[^。！？；;!?，,]*[。！？；;!?，,]?", text):
+        if not tok:
+            continue
+        if buf and len(buf) + len(tok) > max_chars:
+            parts.append(buf)
+            buf = tok
+        else:
+            buf += tok
+    if buf:
+        parts.append(buf)
+    out = []
+    for p in parts:
+        while len(p) > max_chars:
+            out.append(p[:max_chars])
+            p = p[max_chars:]
+        if p:
+            out.append(p)
+    return out or [text]
+
+
+def split_dialogue_by_duration(dialogue_text, max_seconds=8, cps=_CJK_CPS):
+    """Split a dialogue block into contiguous chunks whose spoken duration each
+    fits within max_seconds, so a segment's script never exceeds the producible
+    video length. Splits at utterance boundaries (角色名（情感）：台詞); an utterance
+    longer than the budget is further split at sentence punctuation. Returns a
+    list of dialogue-text strings (>=1, preserving 角色名（情感）：台詞 format)."""
+    max_chars = max(1, int(max_seconds * cps))
+    lines = voice.parse_dialogue_lines(dialogue_text or "")
+    if not lines:
+        return [dialogue_text or ""]
+    units = []  # (speaker, emotion, line)
+    for ln in lines:
+        spk, emo, txt = ln.get("speaker", ""), ln.get("emotion", ""), (ln.get("line") or "").strip()
+        if not txt:
+            continue
+        if len(txt) > max_chars:
+            for piece in _split_line_by_punct(txt, max_chars):
+                units.append((spk, emo, piece))
+        else:
+            units.append((spk, emo, txt))
+    if not units:
+        return [dialogue_text or ""]
+    chunks, cur, cur_chars = [], [], 0
+    for spk, emo, txt in units:
+        if cur and cur_chars + len(txt) > max_chars:
+            chunks.append(cur)
+            cur, cur_chars = [], 0
+        cur.append((spk, emo, txt))
+        cur_chars += len(txt)
+    if cur:
+        chunks.append(cur)
+
+    def _fmt(spk, emo, txt):
+        if spk and emo:
+            return f"{spk}（{emo}）：{txt}"
+        if spk:
+            return f"{spk}：{txt}"
+        return txt
+    return ["\n".join(_fmt(*u) for u in ch) for ch in chunks] or [dialogue_text or ""]
+
+
+def snap_duration(need_seconds, choices=(4, 6, 8)):
+    """Smallest allowed Veo clip length (s) that covers need_seconds (cap = max)."""
+    return next((d for d in choices if d >= need_seconds), choices[-1])
 
 
 def purge_segment_media(task_id, seg, drop=False):
