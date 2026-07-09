@@ -1984,6 +1984,7 @@ if _sb:
 
     elif _sb_stage == "segments":
         st.caption(tr("Segments Review Hint"))
+        _sel_segs = []  # 勾選要重新產製的段落 index，可多選、一次批次重產
         for i, seg in enumerate(_segments):
             st.markdown(f"##### 🎞️ {tr('Segment')} {i + 1}")
             c_v, c_i = st.columns([1, 2])
@@ -2007,21 +2008,34 @@ if _sb:
                     st.warning("⚠️ " + tr("Motion text fallback"))
                 elif _mn == "failed":
                     st.error("❌ " + tr("Motion failed"))
-                if st.button("🔁 " + tr("Re-render Segment"), key=f"reseg_{_sb_tid}_{seg.get('uid', i)}",
-                             use_container_width=True):
-                    _vm = voice.assign_character_voices(_sb_chars, engine=config.ui.get("drama_voice_engine","edge"))
-                    # 戲劇模式重新產製：清掉舊 Veo clip／段落影片，讓其重產新的對嘴影片
-                    if _is_drama:
-                        tm.purge_segment_media(_sb_tid, seg)
-                        _save_storyboard_data(_sb_tid, _sb_style, _segments)
-                    _one = [{"clip": seg.get("clip"), "image": seg.get("image"),
-                             "script_chunk": seg.get("script_chunk"),
-                             "dialogue_text": seg.get("dialogue_text", ""), "index": i}]
-                    _vmo = st.session_state.get(f"vmode_{_sb_tid}", "tts")
-                    jobs.submit(_sb_tid, "batch", "segments",
-                                (lambda si=_one, vm=_vm, vmo=_vmo, am=_is_drama: tm.job_render_segments(
-                                    _sb_tid, params, vm, si, auto_motion=am, voice_mode=vmo)), total=1)
-                    st.rerun()
+                if st.checkbox("🔁 " + tr("Select for re-render"),
+                               key=f"selseg_{_sb_tid}_{seg.get('uid', i)}"):
+                    _sel_segs.append(i)
+
+        # 一次重新產製所有勾選的段落（同一批背景工作依序產，不必點一個等一個）
+        _c_sel1, _c_sel2 = st.columns([3, 1])
+        _c_sel1.caption(("✅ " + tr("Selected") + f"：{len(_sel_segs)}") if _sel_segs
+                        else ("ℹ️ " + tr("Tick segments to re-render")))
+        if _c_sel2.button("🔁 " + tr("Re-render selected"), use_container_width=True,
+                          type="primary", disabled=not _sel_segs):
+            _vm = voice.assign_character_voices(_sb_chars, engine=config.ui.get("drama_voice_engine", "edge"))
+            _vmo = st.session_state.get(f"vmode_{_sb_tid}", "tts")
+            _inputs = []
+            for _si in _sel_segs:
+                _s = _segments[_si]
+                # 戲劇模式重新產製：清掉舊 Veo clip／靜圖／段落影片，讓其重產新片
+                if _is_drama:
+                    tm.purge_segment_media(_sb_tid, _s)
+                _inputs.append({"clip": _s.get("clip"), "image": _s.get("image"),
+                                "script_chunk": _s.get("script_chunk"),
+                                "dialogue_text": _s.get("dialogue_text", ""), "index": _si})
+            if _is_drama:
+                _save_storyboard_data(_sb_tid, _sb_style, _segments)
+            jobs.submit(_sb_tid, "batch", "segments",
+                        (lambda si=_inputs, vm=_vm, vmo=_vmo, am=_is_drama: tm.job_render_segments(
+                            _sb_tid, params, vm, si, auto_motion=am, voice_mode=vmo)),
+                        total=len(_inputs))
+            st.rerun()
 
         # 段落間演繹銜接方式
         _bridge_opts = ["transitions", "crossfade", "generate", "none"]

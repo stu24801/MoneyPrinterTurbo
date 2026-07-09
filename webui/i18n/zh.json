@@ -277,6 +277,10 @@
         "Detailed plot breakdown": "详细剧情分镜",
         "will split into": "切版时将切分为",
         "Regenerate all segments": "全部重新产制",
-        "Regenerate all segments help": "跳过沿用，清掉所有段落旧影片/静图并强制每段重新产制（会重跑 Veo，较花时间）"
+        "Regenerate all segments help": "跳过沿用，清掉所有段落旧影片/静图并强制每段重新产制（会重跑 Veo，较花时间）",
+        "Select for re-render": "勾选重制",
+        "Re-render selected": "重新产制选取段落",
+        "Selected": "已选取",
+        "Tick segments to re-render": "勾选要重新产制的段落，可多选一次产"
     }
 }

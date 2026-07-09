@@ -276,6 +276,10 @@
         "Detailed plot breakdown": "Detailed plot breakdown",
         "will split into": "will split into",
         "Regenerate all segments": "Regenerate all",
-        "Regenerate all segments help": "Skip reuse: purge every segment's old clip/still and force-regenerate all (re-runs Veo, slower)"
+        "Regenerate all segments help": "Skip reuse: purge every segment's old clip/still and force-regenerate all (re-runs Veo, slower)",
+        "Select for re-render": "Select for re-render",
+        "Re-render selected": "Re-render selected",
+        "Selected": "Selected",
+        "Tick segments to re-render": "Tick segments to re-render (multi-select, one click)"
     }
 }
