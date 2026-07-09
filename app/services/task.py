@@ -333,20 +333,53 @@ def _annotate_text_board_cells(rows, n_cells, n_art=9):
     return rows
 
 
-def job_generate_text_board(task_id, params: VideoParams, style, n_segments=0):
+def job_generate_text_board(task_id, params: VideoParams, style, n_segments=0,
+                            batch_size=2):
     """Detailed textual storyboard (per-segment scene / emotion / dialogue / action),
     synthesized from the plot beats + art shots + character designs. Persists
     text_board and advances stage; the UI's '切版' step cuts it into segments.
-    Each row is annotated with its corresponding 25-cell plot-board cell numbers."""
+    Each row is annotated with its corresponding 25-cell plot-board cell numbers.
+
+    Generated in SMALL BATCHES (default 2 segments/call) rather than one giant call:
+    keeps each LLM request small so it returns fast and the JSON parses reliably
+    (the whole-board single call was slow and kept timing out / failing to parse).
+    Progress is reported per batch so the UI shows real progress, not a frozen bar."""
     data = _load_sb(task_id)
     characters = data.get("characters", [])
     script = _script_text(task_id)
-    beats = (data.get("plot_board") or {}).get("beats", [])
-    art = data.get("art_shots", [])
+    beats = (data.get("plot_board") or {}).get("beats", []) or []
+    art = data.get("art_shots", []) or []
     n = int(n_segments) or len(data.get("segments", [])) or 5
-    rows = llm.generate_text_board(script, characters, style=style, n_segments=n,
-                                   plot_beats=beats, art_shots=art)
-    _annotate_text_board_cells(rows, len(beats) or 25, len(art) or 9)
+    n_cells = len(beats) or 25
+    n_art = len(art) or 9
+    b = max(1, int(batch_size))
+
+    rows = []
+    for start in range(0, n, b):
+        count = min(b, n - start)
+        # 這批各段對應的劇情 beats 與環境美術（依 cell_group 連續分組，維持標號一致）
+        seg_beats, seg_art = [], []
+        for j in range(count):
+            i = start + j
+            _lo, _hi, _ = cell_group(i, n, n_cells)
+            seg_beats.append([x for x in beats[_lo:_hi] if x])
+            _am = cell_group(i, n, n_art)[2]
+            _sh = art[_am] if 0 <= _am < len(art) else {}
+            seg_art.append(f"{_sh.get('angle', '')}：{_sh.get('prompt', '')}".strip("："))
+        prev_scene = rows[-1].get("scene", "") if rows else ""
+        chunk = llm.generate_text_board_chunk(
+            script, characters, style, start, count, n,
+            seg_beats, seg_art, prev_scene=prev_scene)
+        rows.extend(chunk)
+        # 逐批存檔並回報進度（heartbeat）→ 前端可見進度、失敗也保留已完成的段
+        _partial = _annotate_text_board_cells(list(rows), n_cells, n_art)
+        d = _load_sb(task_id)
+        d["text_board"] = _partial
+        _save_sb(task_id, d)
+        jobs.update_progress(task_id, "textboard", min(start + count, n), n,
+                             f"segments {start + 1}-{start + count}/{n}")
+
+    _annotate_text_board_cells(rows, n_cells, n_art)
     data = _load_sb(task_id)
     data["text_board"] = rows
     if data.get("stage") in (None, "", "artshots"):

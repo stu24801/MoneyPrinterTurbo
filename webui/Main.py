@@ -2171,7 +2171,7 @@ if _sb:
             _n = len(_segments) or 5
             jobs.submit(_sb_tid, "textboard", "textboard",
                         (lambda stl=_sb_style, n=_n: tm.job_generate_text_board(_sb_tid, params, stl, n)),
-                        total=1)
+                        total=_n)
             st.rerun()
 
     elif _sb_stage == "textboard":
@@ -2249,7 +2249,7 @@ if _sb:
             _n = len(_segments) or len(_text_board) or 5
             jobs.submit(_sb_tid, "textboard", "textboard",
                         (lambda stl=_sb_style, n=_n: tm.job_generate_text_board(_sb_tid, params, stl, n)),
-                        total=1)
+                        total=_n)
             st.rerun()
         if c_cut.button("✂️ " + tr("Cut into segments") + " →", key=f"cut_{_sb_tid}",
                         use_container_width=True, type="primary", disabled=not _text_board):

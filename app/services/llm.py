@@ -858,6 +858,73 @@ Using the story and the visual references below, write a DETAILED textual storyb
     return fallback
 
 
+def generate_text_board_chunk(video_script: str, characters: list, style: str,
+                              start: int, count: int, n_total: int,
+                              seg_beats: list, seg_art: list,
+                              prev_scene: str = "") -> list:
+    """Generate ONE small batch (segments start+1 .. start+count of n_total) of the
+    textual storyboard. Keeping each request small makes the LLM call fast and the
+    JSON reliably parseable (the whole-board single call was slow / kept timing out).
+    seg_beats[j] = plot beats for segment start+j; seg_art[j] = its 'angle：prompt'.
+    Returns exactly `count` rows {scene, emotion, dialogue, action}."""
+    count = max(1, int(count))
+    cast = _character_brief(characters)
+    per_seg = []
+    for j in range(count):
+        k = start + j + 1  # 1-based global segment number
+        beats = "；".join(b for b in (seg_beats[j] if j < len(seg_beats) else []) if b)
+        art = (seg_art[j] if j < len(seg_art) else "") or ""
+        per_seg.append(f"- Segment {k}: plot beats = {beats or '(continue the story)'}; "
+                       f"environment = {art or '(match the scene)'}")
+    seg_spec = "\n".join(per_seg)
+    cont = f"\n## Continuity\nThese follow right after: {prev_scene}. Keep it seamless." if prev_scene else ""
+    prompt = f"""
+# Role: Short-Drama Storyboard Writer
+
+## Goals:
+Write EXACTLY {count} storyboard segments — segments {start + 1} to {start + count} of a {n_total}-segment drama. Each is a shootable beat with acted dialogue.
+
+## Per-segment plot / environment (depict IN ORDER, faithfully):
+{seg_spec}
+
+## Constrains:
+1. Return ONLY a json object: {{"segments": [{{"scene": "...", "emotion": "...", "dialogue": "...", "action": "..."}}, ...]}} with EXACTLY {count} objects, in order.
+2. "scene": one sentence of what happens / where (its plot beat). Under 40 characters.
+3. "emotion": dominant emotional tone. Under 20 characters.
+4. "dialogue": acted lines, ONE line per utterance, EXACT format per line: 角色名（情感）：台詞 — emotion from 平靜, 開心, 激動, 悲傷, 嚴肅, 溫柔, 疑惑, 緊張. 1-3 lines.
+5. "action": camera + character action (blocking, expression, camera move, lighting). Under 80 characters. Purely visual.
+6. Same language as the story. Use only these characters: {cast or "(a small recurring cast)"}. Film style: {style}.{cont}
+
+## Story (full context)
+{video_script}
+""".strip()
+    fallback = [{"scene": "", "emotion": "", "dialogue": "", "action": ""} for _ in range(count)]
+    for _ in range(_max_retries):
+        try:
+            response = _generate_response(prompt)
+            if "Error: " in response:
+                continue
+            m = re.search(r"\{.*\}", response, re.DOTALL)
+            if not m:
+                continue
+            data = json.loads(m.group(0))
+            arr = data.get("segments", []) if isinstance(data, dict) else []
+            rows = []
+            for i in range(count):
+                item = arr[i] if i < len(arr) and isinstance(arr[i], dict) else {}
+                rows.append({
+                    "scene": str(item.get("scene", ""))[:120],
+                    "emotion": str(item.get("emotion", ""))[:40],
+                    "dialogue": str(item.get("dialogue", ""))[:600],
+                    "action": str(item.get("action", ""))[:240],
+                })
+            if any(r["dialogue"] or r["scene"] for r in rows):
+                return rows
+        except Exception as e:
+            logger.warning(f"text board chunk generation failed: {e}")
+    return fallback
+
+
 if __name__ == "__main__":
     video_subject = "生命的意义是什么"
     script = generate_script(
