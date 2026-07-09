@@ -271,6 +271,10 @@
         "Cut into segments": "切版到各段落",
         "Cut done": "已依文字分鏡圖切版到各段落",
         "Corresponding plot cell": "對應分鏡格",
-        "Corresponding art shot": "對應美術構圖"
+        "Corresponding art shot": "對應美術構圖",
+        "Script": "腳本",
+        "fits": "符合",
+        "Detailed plot breakdown": "詳細劇情分鏡",
+        "will split into": "切版時將切分為"
     }
 }

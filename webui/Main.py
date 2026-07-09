@@ -1796,15 +1796,18 @@ if _sb:
                         tr("Segment Script"), value=seg.get("script_chunk", ""),
                         key=f"sb_{_sb_tid}_{_uid}_chunk", height=100)
                 _seg_dur_cur = int(seg.get("duration") or params.video_clip_duration or 6)
-                _spoken = (seg.get("dialogue_text") if _is_drama else seg.get("script_chunk")) or ""
-                _ck_len = len(_spoken.strip())
-                _ck_sec = _ck_len / 4.0
-                _rec_chars = _seg_dur_cur * 4
-                _ck_msg = (f"{_ck_len} {tr('chars')} ≈ {_ck_sec:.0f} {tr('seconds')}"
-                           f"　|　{tr('Clip length suggestion')}：≤ {_rec_chars} {tr('chars')}"
-                           f"（{_seg_dur_cur} {tr('seconds')}）")
-                if _ck_sec > _seg_dur_cur * 1.5:
-                    _ck_msg = "⚠️ " + _ck_msg + "　" + tr("Narration exceeds clip hint")
+                # 台詞估時：戲劇模式只算「台詞內容」（不含 角色名（情感）： 前綴），與切版
+                # 的 estimate_speech_seconds 一致，避免高估而誤判腳本比影片長。
+                if _is_drama:
+                    _ck_sec = tm.estimate_speech_seconds(seg.get("dialogue_text", ""))
+                else:
+                    _ck_sec = len((seg.get("script_chunk") or "").strip()) / 4.0
+                if _ck_sec <= _seg_dur_cur + 0.05:
+                    _ck_msg = (f"✅ {tr('Script')} ≈ {_ck_sec:.1f}s ≤ {tr('Segment duration')} "
+                               f"{_seg_dur_cur}s（{tr('fits')}）")
+                else:
+                    _ck_msg = (f"⚠️ {tr('Script')} ≈ {_ck_sec:.1f}s > {tr('Segment duration')} "
+                               f"{_seg_dur_cur}s　" + tr("Narration exceeds clip hint"))
                 st.caption(_ck_msg)
                 seg["must_say"] = st.text_input(
                     "🔑 " + tr("Must-say Key Line"), value=seg.get("must_say", ""),
@@ -2229,6 +2232,21 @@ if _sb:
                     if _aangle:
                         _corr += f"（{_aangle}）"
                 st.caption(_corr)
+                # 詳細文字分鏡敘述：對應的劇情分鏡格逐格說明（產片時會以此為文字參照）
+                _beats_all = _plot_board.get("beats", []) or []
+                if _cnums and _beats_all:
+                    _det = "　".join(f"**{n}.** {_beats_all[n - 1]}"
+                                     for n in _cnums if 0 < n <= len(_beats_all))
+                    if _det:
+                        st.markdown("🎞 **" + tr("Detailed plot breakdown") + "**：" + _det)
+                # 台詞估時預覽：≤8s 直接一段；超過會在切版時自動切成多段
+                _row_sec = tm.estimate_speech_seconds(_row.get("dialogue", ""))
+                _nsub = max(1, len(tm.split_dialogue_by_duration(_row.get("dialogue", ""), max_seconds=8)))
+                if _nsub > 1:
+                    st.caption(f"⏱ {tr('Script')} ≈ {_row_sec:.1f}s → "
+                               + tr("will split into") + f" {_nsub} " + tr("segments"))
+                else:
+                    st.caption(f"⏱ {tr('Script')} ≈ {_row_sec:.1f}s（≤ 8s）")
                 _sc = st.text_input(tr("Scene"), value=_row.get("scene", ""),
                                     key=f"tb_{_sb_tid}_{_ti}_scene")
                 _em = st.text_input("😊 " + tr("Character emotion"), value=_row.get("emotion", ""),

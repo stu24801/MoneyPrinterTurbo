@@ -270,6 +270,10 @@
         "Cut into segments": "Cut into segments",
         "Cut done": "Cut into segments from the text board",
         "Corresponding plot cell": "Corresponding plot cell",
-        "Corresponding art shot": "Corresponding art shot"
+        "Corresponding art shot": "Corresponding art shot",
+        "Script": "Script",
+        "fits": "fits",
+        "Detailed plot breakdown": "Detailed plot breakdown",
+        "will split into": "will split into"
     }
 }
